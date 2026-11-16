@@ -1,0 +1,1340 @@
+From 48f5589fea20b81a37dc63e929b8c063afe55e16 Mon Sep 17 00:00:00 2001
+From: vocab-kit <local@localhost>
+Date: Tue, 17 Nov 2026 03:59:59 +0800
+Subject: [PATCH 1/2] vocab: FSRS-6 core, bank parser and host tests
+
+Pure-C core (stdio only) so the same code runs on device and in CTest:
+- bank.bin parser with on-demand index reads (no 140 KB RAM copy)
+- day queue: due reviews + new-word quota, interleaved
+- learning steps (1 min / 10 min) and FSRS-6 review scheduling
+- snapshot + append-only journal for crash-safe progress
+- classic Ebbinghaus mode sharing the same state records
+---
+ native/CMakeLists.txt                |   8 +
+ native/include/thingsos/vocab.h      | 121 +++++
+ native/include/thingsos/vocab_fsrs.h |  24 +
+ native/src/vocab.c                   | 769 +++++++++++++++++++++++++++
+ native/src/vocab_fsrs.c              | 103 ++++
+ native/tests/vocab_test.c            | 239 +++++++++
+ 6 files changed, 1264 insertions(+)
+ create mode 100644 native/include/thingsos/vocab.h
+ create mode 100644 native/include/thingsos/vocab_fsrs.h
+ create mode 100644 native/src/vocab.c
+ create mode 100644 native/src/vocab_fsrs.c
+ create mode 100644 native/tests/vocab_test.c
+
+diff --git a/native/CMakeLists.txt b/native/CMakeLists.txt
+index d5ff7fc..3918089 100644
+--- a/native/CMakeLists.txt
++++ b/native/CMakeLists.txt
+@@ -13,6 +13,7 @@ target_sources(thingsos_native_core PRIVATE src/system_monitor.c)
+ add_executable(thingsos_alarm_test tests/alarm_test.c)
+ target_link_libraries(thingsos_alarm_test PRIVATE thingsos_native_core)
+ target_sources(thingsos_native_core PRIVATE src/ima_protocol.c)
++target_sources(thingsos_native_core PRIVATE src/vocab.c src/vocab_fsrs.c)
+ target_sources(thingsos_native_core PRIVATE src/cubox_protocol.c)
+ target_sources(thingsos_native_core PRIVATE src/bluetooth_protocol.c)
+ target_include_directories(thingsos_native_core PUBLIC include PRIVATE vendor/cjson)
+@@ -38,6 +39,13 @@ add_executable(thingsos_page_checkpoint_test tests/page_checkpoint_test.c)
+ target_link_libraries(thingsos_page_checkpoint_test PRIVATE thingsos_native_core)
+ add_test(NAME reader_partial_index_recovery COMMAND thingsos_page_checkpoint_test)
+ add_test(NAME alarm_calendar_schedule COMMAND thingsos_alarm_test)
++add_executable(thingsos_vocab_test tests/vocab_test.c)
++target_link_libraries(thingsos_vocab_test PRIVATE thingsos_native_core ${CMAKE_DL_LIBS})
++if(NOT MSVC)
++ target_link_libraries(thingsos_vocab_test PRIVATE m)
++ target_link_libraries(thingsos_native_core PUBLIC m)
++endif()
++add_test(NAME vocab_bank_and_scheduler COMMAND thingsos_vocab_test)
+ add_executable(thingsos_bluetooth_protocol_test tests/bluetooth_protocol_test.c)
+ target_link_libraries(thingsos_bluetooth_protocol_test PRIVATE thingsos_native_core)
+ add_test(NAME bluetooth_uart_and_saved_devices COMMAND thingsos_bluetooth_protocol_test)
+diff --git a/native/include/thingsos/vocab.h b/native/include/thingsos/vocab.h
+new file mode 100644
+index 0000000..2a6267b
+--- /dev/null
++++ b/native/include/thingsos/vocab.h
+@@ -0,0 +1,121 @@
++// SPDX-License-Identifier: Apache-2.0
++/* Offline word-card learning: FSRS-6 scheduling on top of a small on-SD bank.
++ *
++ * The core is plain C with stdio only, so the same code runs on the device and
++ * in host tests. All persistent files live under <root>/.thingsos/vocab/.
++ * Time is "minutes since 2020-01-01 00:00 local": minute precision is needed
++ * for the 1/10 minute learning steps, day precision for review intervals.
++ */
++#pragma once
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#define VOCAB_WORD_BYTES 64
++#define VOCAB_PHONETIC_BYTES 64
++#define VOCAB_MEANING_BYTES 256
++#define VOCAB_EXAMPLE_BYTES 384
++#define VOCAB_ROOT_BYTES 96
++#define VOCAB_GROUP_BYTES 24
++
++#define VOCAB_MAX_CARDS 100000u
++#define VOCAB_MINUTE_PER_DAY 1440u
++
++typedef enum {
++    VOCAB_STATE_NEW = 0,
++    VOCAB_STATE_LEARNING = 1,
++    VOCAB_STATE_REVIEW = 2,
++    VOCAB_STATE_RELEARNING = 3,
++} vocab_state_t;
++
++/* Grades map onto FSRS 1..4. */
++typedef enum {
++    VOCAB_AGAIN = 1,
++    VOCAB_HARD = 2,
++    VOCAB_GOOD = 3,
++    VOCAB_EASY = 4,
++} vocab_grade_t;
++
++typedef enum {
++    VOCAB_MODE_FSRS = 0,
++    VOCAB_MODE_CLASSIC = 1,
++} vocab_mode_t;
++
++typedef enum {
++    VOCAB_STAGE_WORD = 0,   /* word -> meaning */
++    VOCAB_STAGE_RECALL = 1, /* word -> recall meaning */
++    VOCAB_STAGE_AUDIO = 2,  /* listen -> meaning */
++} vocab_card_stage_t;
++
++typedef struct {
++    uint32_t id;
++    char word[VOCAB_WORD_BYTES];
++    char phonetic[VOCAB_PHONETIC_BYTES];
++    char meaning[VOCAB_MEANING_BYTES];
++    char example_en[VOCAB_EXAMPLE_BYTES];
++    char example_zh[VOCAB_EXAMPLE_BYTES];
++    char root[VOCAB_ROOT_BYTES];
++    char group[VOCAB_GROUP_BYTES];
++} vocab_card_t;
++
++typedef struct {
++    uint16_t new_today;
++    uint16_t due_today;
++    uint16_t reviews_today;
++    uint16_t streak;
++    uint32_t total;
++    uint32_t learned;
++    bool finished;
++} vocab_stats_t;
++
++typedef struct {
++    vocab_mode_t mode;
++    uint8_t target_percent; /* 80..95 */
++    uint16_t new_limit;
++    uint16_t review_limit;
++    bool auto_audio;
++} vocab_config_t;
++
++/* 24 bytes, persisted as-is. */
++typedef struct {
++    uint16_t reps;
++    uint16_t lapses;
++    uint32_t due_min;  /* 0 = new / not scheduled */
++    uint32_t last_min;
++    uint16_t elapsed;  /* days since last review, cached */
++    float stability;
++    float difficulty;
++    uint8_t state;
++    uint8_t flags;
++} vocab_state_record_t;
++
++/* Lifecycle. root is the SD mount point ("/sdcard"). */
++bool vocab_open(const char *root, uint32_t now_min);
++void vocab_close(uint32_t now_min);
++bool vocab_opened(void);
++uint32_t vocab_count(void);
++
++/* Daily session. */
++bool vocab_begin_day(uint32_t now_min, const vocab_config_t *cfg);
++bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage);
++bool vocab_answer(uint32_t now_min, vocab_grade_t grade);
++bool vocab_undo(uint32_t now_min);
++bool vocab_stats(uint32_t now_min, vocab_stats_t *out);
++bool vocab_audio_path(uint32_t id, char *buf, size_t bytes);
++uint32_t vocab_current_id(void);
++vocab_card_stage_t vocab_current_stage(void);
++bool vocab_current_revealed(void);
++void vocab_reveal(void);
++
++/* Settings. */
++void vocab_config_defaults(vocab_config_t *cfg);
++bool vocab_config_load(const char *root, vocab_config_t *cfg);
++bool vocab_config_save(const char *root, const vocab_config_t *cfg);
++
++/* Log export for offline weight optimisation (best effort). */
++bool vocab_export_log(const char *path);
++
++/* Time helpers (YYYYMMDD <-> minutes since 2020-01-01). */
++uint32_t vocab_date_to_day(uint32_t yyyymmdd);
++uint32_t vocab_day_to_date(uint32_t day);
++uint32_t vocab_minutes_from_epoch(uint32_t yyyymmdd, unsigned hour, unsigned minute);
+diff --git a/native/include/thingsos/vocab_fsrs.h b/native/include/thingsos/vocab_fsrs.h
+new file mode 100644
+index 0000000..8dd93ea
+--- /dev/null
++++ b/native/include/thingsos/vocab_fsrs.h
+@@ -0,0 +1,24 @@
++// SPDX-License-Identifier: Apache-2.0
++/* FSRS-6 memory model (21 weights, official defaults).
++ * Pure arithmetic so the host test can check it against reference vectors.
++ */
++#pragma once
++
++typedef struct {
++    float stability;  /* days */
++    float difficulty; /* 1..10 */
++} vocab_fsrs_memory_t;
++
++/* Fresh card, first rating. */
++void vocab_fsrs_initial(int grade, vocab_fsrs_memory_t *memory);
++
++/* Apply a review. `elapsed_days` is time since the last review; when
++ * `same_day` is true the same-day stability branch is used. */
++void vocab_fsrs_review(
++    vocab_fsrs_memory_t *memory, float elapsed_days, int grade, int same_day);
++
++/* Recall probability after `elapsed_days`. */
++float vocab_fsrs_retrievability(float stability, float elapsed_days);
++
++/* Whole-day interval for the requested retention (0.80..0.95). */
++float vocab_fsrs_interval(float stability, float target_retention);
+diff --git a/native/src/vocab.c b/native/src/vocab.c
+new file mode 100644
+index 0000000..79f8856
+--- /dev/null
++++ b/native/src/vocab.c
+@@ -0,0 +1,769 @@
++// SPDX-License-Identifier: Apache-2.0
++/* Word-card bank, FSRS session and durable progress.
++ *
++ * Files under <root>/.thingsos/vocab/
++ *   bank.bin        immutable word bank (produced by vocab_pack.py)
++ *   state.dat       snapshot: 24-byte header + one 28-byte record per card + CRC
++ *   journal.dat     append-only (id + record) log replayed over the snapshot
++ *   config.bin      16-byte settings block
++ *   review-log.csv  append-only review history for offline weight training
++ */
++#include "thingsos/vocab.h"
++#include "thingsos/vocab_fsrs.h"
++
++#include <errno.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#define VOCAB_STATE_MAGIC "VOCS"
++#define VOCAB_BANK_MAGIC "VOCB"
++#define VOCAB_CONFIG_MAGIC "VOCC"
++#define VOCAB_VERSION 1u
++#define VOCAB_INDEX_ENTRY 28u
++#define VOCAB_JOURNAL_ENTRY 32u
++#define VOCAB_CONFIG_BYTES 16u
++#define VOCAB_UNDO_DEPTH 16u
++#define VOCAB_STATE_HEADER 24u
++#define VOCAB_LEARN_AGAIN_MIN 1u
++#define VOCAB_LEARN_GOOD_MIN 10u
++#define VOCAB_RELEARN_MIN 10u
++#define VOCAB_GRADUATE_MIN_DAYS 4u
++
++typedef struct {
++    FILE *file;
++    uint32_t count;
++    uint32_t index_off;
++    uint32_t strings_off;
++    uint32_t bank_hash;
++} vocab_bank_t;
++
++typedef struct {
++    uint32_t word_off;
++    uint32_t meaning_off;
++    uint32_t example_en_off;
++    uint32_t example_zh_off;
++    uint32_t root_off;
++    uint16_t phonetic_off;
++    uint16_t group_off;
++} vocab_index_t;
++
++typedef struct {
++    uint32_t id;
++    vocab_state_record_t record;
++    uint32_t queue_pos;
++    uint16_t new_today;
++    uint16_t reviews_today;
++} vocab_undo_t;
++
++_Static_assert(sizeof(vocab_state_record_t) == 28, "state record layout");
++
++static vocab_bank_t g_bank;
++static vocab_state_record_t *g_records;
++static uint32_t g_count;
++static uint32_t g_bank_hash;
++static char g_root[160];
++static bool g_open;
++
++static uint32_t *g_queue;
++static uint32_t g_queue_len;
++static uint32_t g_queue_pos;
++static uint32_t g_current;
++static bool g_current_valid;
++static bool g_revealed;
++static vocab_card_stage_t g_stage;
++
++static uint32_t g_now;
++static uint32_t g_last_day;
++static uint16_t g_streak;
++static uint16_t g_new_today;
++static uint16_t g_reviews_today;
++static vocab_config_t g_config;
++
++static vocab_undo_t g_undo[VOCAB_UNDO_DEPTH];
++static unsigned g_undo_count;
++
++/* ---------------------------------------------------------------- utility */
++
++static uint32_t crc32_bytes(const void *data, size_t bytes) {
++    const unsigned char *p = data;
++    uint32_t crc = 0xFFFFFFFFu;
++    while (bytes--) {
++        crc ^= *p++;
++        for (int bit = 0; bit < 8; bit++)
++            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
++    }
++    return ~crc;
++}
++
++uint32_t vocab_date_to_day(uint32_t yyyymmdd) {
++    uint32_t y = yyyymmdd / 10000u, m = yyyymmdd / 100u % 100u, d = yyyymmdd % 100u;
++    if (y < 2020u) y = 2020u;
++    if (m < 1u) m = 1u;
++    if (m > 12u) m = 12u;
++    if (d < 1u) d = 1u;
++    if (d > 31u) d = 31u;
++    y -= (m <= 2u);
++    const uint32_t era = y / 400u;
++    const uint32_t yoe = y - era * 400u;
++    const uint32_t doy = (153u * (m > 2u ? m - 3u : m + 9u) + 2u) / 5u + d - 1u;
++    const uint32_t doe = yoe * 365u + yoe / 4u - yoe / 100u + doy;
++    const uint32_t days = era * 146097u + doe; /* days since 0000-era epoch */
++    const uint32_t epoch = 719468u + 18262u;   /* 1970-01-01 + 50 years */
++    return days >= epoch ? days - epoch : 0u;
++}
++
++uint32_t vocab_day_to_date(uint32_t day) {
++    uint32_t z = day + 18262u + 719468u;
++    const uint32_t era = z / 146097u;
++    const uint32_t doe = z - era * 146097u;
++    const uint32_t yoe = (doe - doe / 1460u + doe / 36524u - doe / 146096u) / 365u;
++    uint32_t y = yoe + era * 400u;
++    const uint32_t doy = doe - (365u * yoe + yoe / 4u - yoe / 100u);
++    const uint32_t mp = (5u * doy + 2u) / 153u;
++    const uint32_t d = doy - (153u * mp + 2u) / 5u + 1u;
++    const uint32_t m = mp < 10u ? mp + 3u : mp - 9u;
++    y += (m <= 2u);
++    return y * 10000u + m * 100u + d;
++}
++
++uint32_t vocab_minutes_from_epoch(uint32_t yyyymmdd, unsigned hour, unsigned minute) {
++    return vocab_date_to_day(yyyymmdd) * VOCAB_MINUTE_PER_DAY + (hour % 24u) * 60u +
++           (minute % 60u);
++}
++
++static void path_of(char *buf, size_t bytes, const char *name) {
++    snprintf(buf, bytes, "%s/.thingsos/vocab/%s", g_root, name);
++}
++
++static bool ensure_dir(const char *path) {
++    if (mkdir(path, 0775) == 0) return true;
++    return errno == EEXIST;
++}
++
++static bool ensure_dirs(void) {
++    char path[256];
++    snprintf(path, sizeof(path), "%s/.thingsos", g_root);
++    if (!ensure_dir(path)) return false;
++    snprintf(path, sizeof(path), "%s/.thingsos/vocab", g_root);
++    if (!ensure_dir(path)) return false;
++    snprintf(path, sizeof(path), "%s/.thingsos/vocab/audio", g_root);
++    return ensure_dir(path);
++}
++
++/* ------------------------------------------------------------------ config */
++
++void vocab_config_defaults(vocab_config_t *cfg) {
++    if (!cfg) return;
++    cfg->mode = VOCAB_MODE_FSRS;
++    cfg->target_percent = 90;
++    cfg->new_limit = 20;
++    cfg->review_limit = 200;
++    cfg->auto_audio = true;
++}
++
++bool vocab_config_load(const char *root, vocab_config_t *cfg) {
++    vocab_config_defaults(cfg);
++    char path[256];
++    snprintf(path, sizeof(path), "%s/.thingsos/vocab/config.bin", root);
++    FILE *f = fopen(path, "rb");
++    if (!f) return false;
++    unsigned char raw[VOCAB_CONFIG_BYTES];
++    size_t got = fread(raw, 1, sizeof(raw), f);
++    fclose(f);
++    if (got != sizeof(raw) || memcmp(raw, VOCAB_CONFIG_MAGIC, 4) != 0) return false;
++    uint32_t crc = 0;
++    memcpy(&crc, raw + 12, 4);
++    if (crc != crc32_bytes(raw, 12)) return false;
++    cfg->mode = (vocab_mode_t)raw[4];
++    cfg->target_percent = raw[5];
++    uint16_t value = 0;
++    memcpy(&value, raw + 6, 2);
++    cfg->new_limit = value;
++    memcpy(&value, raw + 8, 2);
++    cfg->review_limit = value;
++    cfg->auto_audio = raw[10] != 0;
++    if (cfg->mode != VOCAB_MODE_CLASSIC) cfg->mode = VOCAB_MODE_FSRS;
++    if (cfg->target_percent < 80 || cfg->target_percent > 95) cfg->target_percent = 90;
++    if (cfg->new_limit == 0 || cfg->new_limit > 200) cfg->new_limit = 20;
++    if (cfg->review_limit < 20 || cfg->review_limit > 2000) cfg->review_limit = 200;
++    return true;
++}
++
++bool vocab_config_save(const char *root, const vocab_config_t *cfg) {
++    char path[256];
++    snprintf(path, sizeof(path), "%s/.thingsos/vocab/config.bin", root);
++    unsigned char raw[VOCAB_CONFIG_BYTES] = {0};
++    memcpy(raw, VOCAB_CONFIG_MAGIC, 4);
++    raw[4] = (unsigned char)cfg->mode;
++    raw[5] = cfg->target_percent;
++    memcpy(raw + 6, &cfg->new_limit, 2);
++    memcpy(raw + 8, &cfg->review_limit, 2);
++    raw[10] = cfg->auto_audio ? 1 : 0;
++    uint32_t crc = crc32_bytes(raw, 12);
++    memcpy(raw + 12, &crc, 4);
++    FILE *f = fopen(path, "wb");
++    if (!f) return false;
++    bool ok = fwrite(raw, 1, sizeof(raw), f) == sizeof(raw);
++    fflush(f);
++    fclose(f);
++    return ok;
++}
++
++/* -------------------------------------------------------------------- bank */
++
++static bool read_string(uint32_t offset, char *buf, size_t bytes) {
++    if (!buf || bytes == 0) return false;
++    buf[0] = 0;
++    if (!g_bank.file) return false;
++    if (fseek(g_bank.file, (long)(g_bank.strings_off + offset), SEEK_SET) != 0) return false;
++    size_t used = 0;
++    for (;;) {
++        int ch = fgetc(g_bank.file);
++        if (ch == EOF || ch == 0) break;
++        if (used + 1 < bytes) buf[used++] = (char)ch;
++    }
++    buf[used] = 0;
++    return true;
++}
++
++static bool read_index(uint32_t id, vocab_index_t *index) {
++    if (!g_bank.file || id >= g_bank.count) return false;
++    if (fseek(g_bank.file, (long)(g_bank.index_off + id * VOCAB_INDEX_ENTRY), SEEK_SET) != 0)
++        return false;
++    unsigned char raw[VOCAB_INDEX_ENTRY];
++    if (fread(raw, 1, sizeof(raw), g_bank.file) != sizeof(raw)) return false;
++    memset(index, 0, sizeof(*index));
++    memcpy(&index->word_off, raw + 0, 4);
++    memcpy(&index->meaning_off, raw + 4, 4);
++    memcpy(&index->example_en_off, raw + 8, 4);
++    memcpy(&index->example_zh_off, raw + 12, 4);
++    memcpy(&index->root_off, raw + 16, 4);
++    memcpy(&index->phonetic_off, raw + 20, 2);
++    memcpy(&index->group_off, raw + 22, 2);
++    return true;
++}
++
++static bool bank_open(void) {
++    char path[256];
++    path_of(path, sizeof(path), "bank.bin");
++    g_bank.file = fopen(path, "rb");
++    if (!g_bank.file) return false;
++    unsigned char head[32];
++    if (fread(head, 1, sizeof(head), g_bank.file) != sizeof(head)) return false;
++    if (memcmp(head, VOCAB_BANK_MAGIC, 4) != 0) return false;
++    uint16_t version = 0, count = 0;
++    memcpy(&version, head + 4, 2);
++    memcpy(&count, head + 6, 2);
++    if (version != VOCAB_VERSION || count == 0 || count > 20000u) return false;
++    memcpy(&g_bank.index_off, head + 8, 4);
++    memcpy(&g_bank.strings_off, head + 12, 4);
++    memcpy(&g_bank.bank_hash, head + 16, 4);
++    uint32_t stored = 0;
++    memcpy(&stored, head + 28, 4);
++    if (stored != crc32_bytes(head, 28)) return false;
++    g_bank.count = count;
++    return true;
++}
++
++static void bank_close(void) {
++    if (g_bank.file) fclose(g_bank.file);
++    memset(&g_bank, 0, sizeof(g_bank));
++}
++
++/* ------------------------------------------------------------------- state */
++
++static void state_path(char *buf, size_t bytes) { path_of(buf, bytes, "state.dat"); }
++static void journal_path(char *buf, size_t bytes) { path_of(buf, bytes, "journal.dat"); }
++
++static void record_default(vocab_state_record_t *record) {
++    memset(record, 0, sizeof(*record));
++    record->state = VOCAB_STATE_NEW;
++}
++
++static bool state_load(void) {
++    g_count = g_bank.count;
++    g_records = calloc(g_count, sizeof(vocab_state_record_t));
++    if (!g_records) return false;
++    for (uint32_t i = 0; i < g_count; i++) record_default(&g_records[i]);
++
++    char path[256];
++    state_path(path, sizeof(path));
++    FILE *f = fopen(path, "rb");
++    if (!f) return true;
++    unsigned char head[VOCAB_STATE_HEADER];
++    if (fread(head, 1, sizeof(head), f) != sizeof(head) ||
++        memcmp(head, VOCAB_STATE_MAGIC, 4) != 0) {
++        fclose(f);
++        return true;
++    }
++    uint16_t version = 0, stored_count = 0, streak = 0, new_today = 0, reviews = 0;
++    uint32_t last_day = 0, bank_hash = 0;
++    memcpy(&version, head + 4, 2);
++    memcpy(&stored_count, head + 6, 2);
++    memcpy(&last_day, head + 8, 4);
++    memcpy(&streak, head + 12, 2);
++    memcpy(&new_today, head + 14, 2);
++    memcpy(&reviews, head + 16, 2);
++    memcpy(&bank_hash, head + 20, 4);
++    if (version != VOCAB_VERSION || stored_count != (uint16_t)g_count ||
++        bank_hash != g_bank_hash) {
++        fclose(f);
++        return true;
++    }
++    size_t bytes = (size_t)g_count * sizeof(vocab_state_record_t);
++    vocab_state_record_t *tmp = malloc(bytes);
++    if (!tmp) {
++        fclose(f);
++        return false;
++    }
++    size_t got = fread(tmp, 1, bytes, f);
++    uint32_t stored_crc = 0;
++    bool ok = got == bytes && fread(&stored_crc, 1, 4, f) == 4 &&
++              stored_crc == crc32_bytes(tmp, bytes);
++    fclose(f);
++    if (ok) {
++        memcpy(g_records, tmp, bytes);
++        g_last_day = last_day;
++        g_streak = streak;
++        g_new_today = new_today;
++        g_reviews_today = reviews;
++    }
++    free(tmp);
++    return true;
++}
++
++static bool state_save(void) {
++    char path[256], journal[256], tmp_path[320];
++    state_path(path, sizeof(path));
++    journal_path(journal, sizeof(journal));
++    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
++
++    size_t bytes = (size_t)g_count * sizeof(vocab_state_record_t);
++    unsigned char head[VOCAB_STATE_HEADER] = {0};
++    memcpy(head, VOCAB_STATE_MAGIC, 4);
++    uint16_t version = VOCAB_VERSION, count = (uint16_t)g_count;
++    memcpy(head + 4, &version, 2);
++    memcpy(head + 6, &count, 2);
++    memcpy(head + 8, &g_last_day, 4);
++    memcpy(head + 12, &g_streak, 2);
++    memcpy(head + 14, &g_new_today, 2);
++    memcpy(head + 16, &g_reviews_today, 2);
++    memcpy(head + 20, &g_bank_hash, 4);
++
++    FILE *f = fopen(tmp_path, "wb");
++    if (!f) return false;
++    bool ok = fwrite(head, 1, sizeof(head), f) == sizeof(head) &&
++              fwrite(g_records, 1, bytes, f) == bytes;
++    uint32_t crc = ok ? crc32_bytes(g_records, bytes) : 0;
++    ok = ok && fwrite(&crc, 1, 4, f) == 4;
++    fflush(f);
++    fclose(f);
++    if (!ok) {
++        remove(tmp_path);
++        return false;
++    }
++    remove(path);
++    if (rename(tmp_path, path) != 0) return false;
++    FILE *j = fopen(journal, "wb");
++    if (j) fclose(j);
++    return true;
++}
++
++static void journal_append(uint32_t id, const vocab_state_record_t *record) {
++    char path[256];
++    journal_path(path, sizeof(path));
++    FILE *f = fopen(path, "ab");
++    if (!f) return;
++    unsigned char raw[VOCAB_JOURNAL_ENTRY] = {0};
++    memcpy(raw, &id, 4);
++    memcpy(raw + 4, record, sizeof(*record));
++    fwrite(raw, 1, sizeof(raw), f);
++    fflush(f);
++    fclose(f);
++}
++
++static void journal_replay(void) {
++    char path[256];
++    journal_path(path, sizeof(path));
++    FILE *f = fopen(path, "rb");
++    if (!f) return;
++    unsigned char raw[VOCAB_JOURNAL_ENTRY];
++    while (fread(raw, 1, sizeof(raw), f) == sizeof(raw)) {
++        uint32_t id = 0;
++        memcpy(&id, raw, 4);
++        if (id >= g_count) continue;
++        memcpy(&g_records[id], raw + 4, sizeof(vocab_state_record_t));
++    }
++    fclose(f);
++}
++
++static void log_review(uint32_t id, int grade, uint32_t now_min,
++                       const vocab_state_record_t *record) {
++    char path[256];
++    path_of(path, sizeof(path), "review-log.csv");
++    bool fresh = access(path, F_OK) != 0;
++    FILE *f = fopen(path, "a");
++    if (!f) return;
++    if (fresh) fputs("id,day,minute,grade,elapsed_days,stability,difficulty\n", f);
++    fprintf(f, "%u,%u,%u,%d,%u,%.4f,%.4f\n", (unsigned)id,
++            (unsigned)(now_min / VOCAB_MINUTE_PER_DAY),
++            (unsigned)(now_min % VOCAB_MINUTE_PER_DAY), grade,
++            (unsigned)record->elapsed, (double)record->stability,
++            (double)record->difficulty);
++    fclose(f);
++}
++
++/* -------------------------------------------------------------- scheduling */
++
++static uint32_t graduate_days(const vocab_config_t *cfg, float stability) {
++    float days = vocab_fsrs_interval(stability, (float)cfg->target_percent / 100.0f);
++    if (days < 1.0f) days = 1.0f;
++    return (uint32_t)days;
++}
++
++static void schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
++                            uint32_t now_min, const vocab_config_t *cfg) {
++    const uint32_t day = now_min / VOCAB_MINUTE_PER_DAY;
++    uint32_t elapsed_min = record->last_min && now_min > record->last_min
++                               ? now_min - record->last_min
++                               : 0;
++    uint16_t elapsed_days = (uint16_t)(elapsed_min / VOCAB_MINUTE_PER_DAY);
++    const bool same_day = record->last_min != 0 && elapsed_min > 0 &&
++                          elapsed_min < VOCAB_MINUTE_PER_DAY;
++
++    if (cfg->mode == VOCAB_MODE_CLASSIC) {
++        static const uint16_t table[8] = {1, 1, 2, 4, 7, 15, 30, 60};
++        unsigned step = record->reps;
++        if (record->state == VOCAB_STATE_NEW) step = 0;
++        uint32_t days;
++        if (grade == VOCAB_AGAIN) {
++            step = 0;
++            record->state = record->state == VOCAB_STATE_REVIEW ||
++                                    record->state == VOCAB_STATE_RELEARNING
++                                ? VOCAB_STATE_RELEARNING
++                                : VOCAB_STATE_LEARNING;
++            record->due_min = now_min + VOCAB_RELEARN_MIN;
++            record->lapses++;
++            days = 0;
++        } else {
++            if (grade == VOCAB_HARD) {
++                days = table[step < 8 ? step : 7] > 1 ? table[step < 8 ? step : 7] / 2 : 1;
++            } else if (grade == VOCAB_GOOD) {
++                step = step + 1 > 7 ? 7 : step + 1;
++                days = table[step];
++            } else {
++                step = step + 2 > 7 ? 7 : step + 2;
++                days = table[step];
++            }
++            record->state = VOCAB_STATE_REVIEW;
++            record->due_min = now_min + days * VOCAB_MINUTE_PER_DAY;
++        }
++        record->reps = (uint16_t)step;
++        record->last_min = now_min;
++        record->elapsed = elapsed_days;
++        return;
++    }
++
++    vocab_fsrs_memory_t memory = {record->stability, record->difficulty};
++    if (record->state == VOCAB_STATE_NEW) {
++        vocab_fsrs_initial((int)grade, &memory);
++    } else {
++        float elapsed = same_day ? 0.0f : (elapsed_days ? (float)elapsed_days : 1.0f);
++        vocab_fsrs_review(&memory, elapsed, (int)grade, same_day ? 1 : 0);
++    }
++
++    const bool learning = record->state == VOCAB_STATE_NEW ||
++                          record->state == VOCAB_STATE_LEARNING ||
++                          record->state == VOCAB_STATE_RELEARNING;
++    if (learning) {
++        if (grade == VOCAB_AGAIN) {
++            record->state = record->state == VOCAB_STATE_NEW ? VOCAB_STATE_LEARNING
++                                                             : VOCAB_STATE_RELEARNING;
++            record->due_min = now_min + VOCAB_LEARN_AGAIN_MIN;
++            record->lapses++;
++        } else if (grade == VOCAB_HARD) {
++            record->due_min = now_min + VOCAB_LEARN_GOOD_MIN / 2;
++            if (record->state == VOCAB_STATE_NEW) record->state = VOCAB_STATE_LEARNING;
++        } else if (grade == VOCAB_GOOD && record->state == VOCAB_STATE_NEW) {
++            record->state = VOCAB_STATE_LEARNING;
++            record->due_min = now_min + VOCAB_LEARN_GOOD_MIN;
++        } else {
++            record->state = VOCAB_STATE_REVIEW;
++            record->due_min =
++                now_min + graduate_days(cfg, memory.stability) * VOCAB_MINUTE_PER_DAY;
++        }
++    } else if (grade == VOCAB_AGAIN) {
++        record->state = VOCAB_STATE_RELEARNING;
++        record->lapses++;
++        record->due_min = now_min + VOCAB_RELEARN_MIN;
++    } else {
++        record->due_min =
++            now_min + graduate_days(cfg, memory.stability) * VOCAB_MINUTE_PER_DAY;
++    }
++
++    record->stability = memory.stability;
++    record->difficulty = memory.difficulty;
++    record->reps++;
++    record->last_min = now_min;
++    record->elapsed = elapsed_days;
++}
++
++/* ------------------------------------------------------------------ queue */
++
++static void queue_push(uint32_t id) {
++    if (!g_queue || g_queue_len >= g_count) return;
++    g_queue[g_queue_len++] = id;
++}
++
++static void queue_build(uint32_t now_min, const vocab_config_t *cfg) {
++    g_queue_len = 0;
++    g_queue_pos = 0;
++    if (!g_queue || !g_records) return;
++    uint32_t new_added = 0, due_added = 0;
++    for (uint32_t i = 0; i < g_count; i++) {
++        vocab_state_record_t *record = &g_records[i];
++        if (record->state != VOCAB_STATE_NEW && record->due_min && record->due_min <= now_min) {
++            if (due_added < cfg->review_limit) {
++                queue_push(i);
++                due_added++;
++            }
++        }
++    }
++    for (uint32_t i = 0; i < g_count && new_added < cfg->new_limit; i++) {
++        if (g_records[i].state == VOCAB_STATE_NEW) {
++            /* Interleave new cards after the first few due cards. */
++            queue_push(i);
++            new_added++;
++        }
++    }
++}
++
++static bool queue_reinsert(uint32_t id) {
++    if (!g_queue || g_queue_len >= g_count) return false;
++    uint32_t at = g_queue_pos + 3;
++    if (at > g_queue_len) at = g_queue_len;
++    memmove(g_queue + at + 1, g_queue + at, (g_queue_len - at) * sizeof(uint32_t));
++    g_queue[at] = id;
++    g_queue_len++;
++    return true;
++}
++
++/* ------------------------------------------------------------------- API */
++
++bool vocab_open(const char *root, uint32_t now_min) {
++    if (!root || !*root) return false;
++    vocab_close(now_min);
++    snprintf(g_root, sizeof(g_root), "%s", root);
++    g_now = now_min;
++    if (!ensure_dirs()) return false;
++    if (!bank_open()) {
++        bank_close();
++        return false;
++    }
++    g_bank_hash = g_bank.bank_hash;
++    if (!state_load()) {
++        bank_close();
++        free(g_records);
++        g_records = NULL;
++        return false;
++    }
++    journal_replay();
++    g_queue = calloc(g_count ? g_count : 1, sizeof(uint32_t));
++    vocab_config_load(g_root, &g_config);
++    g_open = true;
++    g_current_valid = false;
++    return g_queue != NULL;
++}
++
++void vocab_close(uint32_t now_min) {
++    if (g_open) {
++        g_now = now_min ? now_min : g_now;
++        state_save();
++    }
++    bank_close();
++    free(g_records);
++    free(g_queue);
++    g_records = NULL;
++    g_queue = NULL;
++    g_count = 0;
++    g_queue_len = g_queue_pos = 0;
++    g_undo_count = 0;
++    g_open = false;
++}
++
++bool vocab_opened(void) { return g_open; }
++uint32_t vocab_count(void) { return g_count; }
++
++bool vocab_begin_day(uint32_t now_min, const vocab_config_t *cfg) {
++    if (!g_open) return false;
++    if (cfg) g_config = *cfg;
++    g_now = now_min;
++    const uint32_t day = now_min / VOCAB_MINUTE_PER_DAY;
++    if (day != g_last_day) {
++        g_streak = (g_last_day && day == g_last_day + 1) ? (uint16_t)(g_streak + 1) : 1;
++        g_last_day = day;
++        g_new_today = 0;
++        g_reviews_today = 0;
++    }
++    queue_build(now_min, &g_config);
++    return true;
++}
++
++bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage) {
++    if (!g_open || !out || !g_queue) return false;
++    while (g_queue_pos < g_queue_len) {
++        uint32_t id = g_queue[g_queue_pos];
++        if (id >= g_count) {
++            g_queue_pos++;
++            continue;
++        }
++        vocab_state_record_t *record = &g_records[id];
++        if (record->state != VOCAB_STATE_NEW && record->due_min && record->due_min > g_now) {
++            g_queue_pos++;
++            continue;
++        }
++        g_current = id;
++        g_current_valid = true;
++        g_revealed = false;
++
++        vocab_index_t index;
++        if (!read_index(id, &index)) {
++            g_queue_pos++;
++            continue;
++        }
++        memset(out, 0, sizeof(*out));
++        out->id = id;
++        read_string(index.word_off, out->word, sizeof(out->word));
++        read_string(index.phonetic_off, out->phonetic, sizeof(out->phonetic));
++        read_string(index.meaning_off, out->meaning, sizeof(out->meaning));
++        read_string(index.example_en_off, out->example_en, sizeof(out->example_en));
++        read_string(index.example_zh_off, out->example_zh, sizeof(out->example_zh));
++        read_string(index.root_off, out->root, sizeof(out->root));
++        read_string(index.group_off, out->group, sizeof(out->group));
++
++        if (record->state == VOCAB_STATE_NEW) {
++            g_stage = VOCAB_STAGE_WORD;
++        } else if (record->state == VOCAB_STATE_REVIEW && (record->reps % 3u) == 1u) {
++            g_stage = VOCAB_STAGE_AUDIO;
++        } else {
++            g_stage = VOCAB_STAGE_RECALL;
++        }
++        if (stage) *stage = g_stage;
++        return true;
++    }
++    g_current_valid = false;
++    return false;
++}
++
++bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
++    if (!g_open || !g_current_valid) return false;
++    if (grade < VOCAB_AGAIN || grade > VOCAB_EASY) return false;
++    g_now = now_min;
++    vocab_state_record_t *record = &g_records[g_current];
++    const bool was_new = record->state == VOCAB_STATE_NEW;
++
++    vocab_undo_t *undo = &g_undo[g_undo_count % VOCAB_UNDO_DEPTH];
++    undo->id = g_current;
++    undo->record = *record;
++    undo->queue_pos = g_queue_pos;
++    undo->new_today = g_new_today;
++    undo->reviews_today = g_reviews_today;
++    g_undo_count++;
++
++    schedule_record(record, grade, now_min, &g_config);
++    journal_append(g_current, record);
++    log_review(g_current, (int)grade, now_min, record);
++    g_queue_pos++;
++    if (was_new && g_new_today < 0xFFFF) g_new_today++;
++    if (g_reviews_today < 0xFFFF) g_reviews_today++;
++
++    if (record->state == VOCAB_STATE_LEARNING || record->state == VOCAB_STATE_RELEARNING)
++        queue_reinsert(g_current);
++    g_current_valid = false;
++    return true;
++}
++
++bool vocab_undo(uint32_t now_min) {
++    if (!g_open || g_undo_count == 0) return false;
++    g_undo_count--;
++    vocab_undo_t *undo = &g_undo[g_undo_count % VOCAB_UNDO_DEPTH];
++    if (undo->id >= g_count) return false;
++    g_records[undo->id] = undo->record;
++    g_queue_pos = undo->queue_pos;
++    g_new_today = undo->new_today;
++    g_reviews_today = undo->reviews_today;
++    g_current = undo->id;
++    g_current_valid = true;
++    g_now = now_min ? now_min : g_now;
++    /* Tombstone the last journal entry so a crash cannot replay the undone step. */
++    char path[256];
++    journal_path(path, sizeof(path));
++    FILE *f = fopen(path, "rb+");
++    if (f) {
++        if (fseek(f, -(long)VOCAB_JOURNAL_ENTRY, SEEK_END) == 0) {
++            unsigned char zero[VOCAB_JOURNAL_ENTRY] = {0};
++            fwrite(zero, 1, sizeof(zero), f);
++            fflush(f);
++        }
++        fclose(f);
++    }
++    return true;
++}
++
++bool vocab_stats(uint32_t now_min, vocab_stats_t *out) {
++    if (!g_open || !out) return false;
++    memset(out, 0, sizeof(*out));
++    g_now = now_min ? now_min : g_now;
++    out->new_today = g_new_today;
++    out->reviews_today = g_reviews_today;
++    out->streak = g_streak;
++    for (uint32_t i = 0; i < g_count; i++) {
++        const vocab_state_record_t *record = &g_records[i];
++        if (record->state != VOCAB_STATE_NEW) {
++            out->learned++;
++            if (record->due_min && record->due_min <= g_now) out->due_today++;
++        }
++        out->total++;
++    }
++    out->finished = g_queue_pos >= g_queue_len;
++    return true;
++}
++
++bool vocab_audio_path(uint32_t id, char *buf, size_t bytes) {
++    if (!buf || bytes == 0) return false;
++    snprintf(buf, bytes, "%s/.thingsos/vocab/audio/%u.mp3", g_root, (unsigned)id);
++    return access(buf, R_OK) == 0;
++}
++
++uint32_t vocab_current_id(void) { return g_current_valid ? g_current : 0xFFFFFFFFu; }
++vocab_card_stage_t vocab_current_stage(void) { return g_stage; }
++bool vocab_current_revealed(void) { return g_revealed; }
++void vocab_reveal(void) { g_revealed = true; }
++
++bool vocab_export_log(const char *path) {
++    if (!path || !*path) return false;
++    char source[256];
++    path_of(source, sizeof(source), "review-log.csv");
++    FILE *in = fopen(source, "rb");
++    if (!in) return false;
++    FILE *out = fopen(path, "wb");
++    if (!out) {
++        fclose(in);
++        return false;
++    }
++    char buffer[512];
++    size_t got;
++    bool ok = true;
++    while ((got = fread(buffer, 1, sizeof(buffer), in)) > 0) {
++        if (fwrite(buffer, 1, got, out) != got) {
++            ok = false;
++            break;
++        }
++    }
++    fclose(in);
++    fclose(out);
++    return ok;
++}
+diff --git a/native/src/vocab_fsrs.c b/native/src/vocab_fsrs.c
+new file mode 100644
+index 0000000..7479f90
+--- /dev/null
++++ b/native/src/vocab_fsrs.c
+@@ -0,0 +1,103 @@
++// SPDX-License-Identifier: Apache-2.0
++#include "thingsos/vocab_fsrs.h"
++
++#include <math.h>
++
++#define FSRS_MIN_STABILITY 0.01f
++#define FSRS_MAX_STABILITY 36500.0f
++#define FSRS_MIN_DIFFICULTY 1.0f
++#define FSRS_MAX_DIFFICULTY 10.0f
++
++/* Official FSRS-6 default parameters (open-spaced-repetition). */
++static const float FSRS_W[21] = {
++    0.212f, 1.2931f, 2.3065f, 8.2956f, 6.4133f, 0.8334f, 3.0194f,
++    0.001f, 1.8722f, 0.1666f, 0.796f, 1.4835f, 0.0614f, 0.2629f,
++    1.6483f, 0.6014f, 1.8729f, 0.5425f, 0.0912f, 0.0658f, 0.1542f,
++};
++
++static float clampf(float value, float low, float high) {
++    return value < low ? low : (value > high ? high : value);
++}
++
++/* F chosen so that R(S, S) = 0.9 for the trainable decay w20. */
++static float decay_factor(void) {
++    return powf(0.9f, -1.0f / FSRS_W[20]) - 1.0f;
++}
++
++static float difficulty_anchor_easy(void) {
++    return FSRS_W[4] - expf(FSRS_W[5] * 3.0f) + 1.0f;
++}
++
++float vocab_fsrs_retrievability(float stability, float elapsed_days) {
++    if (!(stability > 0.0f)) return 0.0f;
++    if (elapsed_days <= 0.0f) return 1.0f;
++    const float factor = decay_factor();
++    return powf(1.0f + factor * elapsed_days / stability, -FSRS_W[20]);
++}
++
++float vocab_fsrs_interval(float stability, float target_retention) {
++    if (!(stability > 0.0f)) return 1.0f;
++    float retention = clampf(target_retention, 0.80f, 0.95f);
++    const float factor = decay_factor();
++    float days = stability / factor *
++                 (powf(retention, -1.0f / FSRS_W[20]) - 1.0f);
++    if (!(days >= 1.0f)) days = 1.0f;
++    return roundf(days);
++}
++
++void vocab_fsrs_initial(int grade, vocab_fsrs_memory_t *memory) {
++    int index = grade - 1;
++    if (index < 0) index = 0;
++    if (index > 3) index = 3;
++    float stability = FSRS_W[index];
++    float difficulty = FSRS_W[4] - expf(FSRS_W[5] * (float)index) + 1.0f;
++    memory->stability = clampf(stability, FSRS_MIN_STABILITY, FSRS_MAX_STABILITY);
++    memory->difficulty = clampf(difficulty, FSRS_MIN_DIFFICULTY, FSRS_MAX_DIFFICULTY);
++}
++
++void vocab_fsrs_review(
++    vocab_fsrs_memory_t *memory, float elapsed_days, int grade, int same_day) {
++    if (!memory) return;
++    if (!(memory->stability > 0.0f)) {
++        vocab_fsrs_initial(grade, memory);
++        return;
++    }
++    if (grade < 1) grade = 1;
++    if (grade > 4) grade = 4;
++
++    const float stability = memory->stability;
++    const float difficulty = memory->difficulty;
++    float next = stability;
++
++    if (same_day) {
++        float growth = expf(FSRS_W[17] * ((float)grade - 3.0f + FSRS_W[18])) *
++                       powf(stability, -FSRS_W[19]);
++        if (grade >= 2 && growth < 1.0f) growth = 1.0f;
++        next = stability * growth;
++    } else {
++        const float recall = vocab_fsrs_retrievability(stability, elapsed_days);
++        if (grade == 1) {
++            float forgotten = FSRS_W[11] * powf(difficulty, -FSRS_W[12]) *
++                              (powf(stability + 1.0f, FSRS_W[13]) - 1.0f) *
++                              expf(FSRS_W[14] * (1.0f - recall));
++            next = forgotten < stability ? forgotten : stability;
++        } else {
++            const float hard_penalty = grade == 2 ? FSRS_W[15] : 1.0f;
++            const float easy_bonus = grade == 4 ? FSRS_W[16] : 1.0f;
++            const float growth = expf(FSRS_W[8]) * (11.0f - difficulty) *
++                                 powf(stability, -FSRS_W[9]) *
++                                 (expf(FSRS_W[10] * (1.0f - recall)) - 1.0f) *
++                                 hard_penalty * easy_bonus;
++            next = stability * (1.0f + growth);
++        }
++    }
++
++    float delta = -FSRS_W[6] * ((float)grade - 3.0f);
++    float adjusted = difficulty + delta * (10.0f - difficulty) / 9.0f;
++    float next_difficulty = FSRS_W[7] * difficulty_anchor_easy() +
++                            (1.0f - FSRS_W[7]) * adjusted;
++
++    memory->stability = clampf(next, FSRS_MIN_STABILITY, FSRS_MAX_STABILITY);
++    memory->difficulty =
++        clampf(next_difficulty, FSRS_MIN_DIFFICULTY, FSRS_MAX_DIFFICULTY);
++}
+diff --git a/native/tests/vocab_test.c b/native/tests/vocab_test.c
+new file mode 100644
+index 0000000..656743c
+--- /dev/null
++++ b/native/tests/vocab_test.c
+@@ -0,0 +1,239 @@
++// SPDX-License-Identifier: Apache-2.0
++#include "thingsos/vocab.h"
++#include "thingsos/vocab_fsrs.h"
++
++#include <math.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <unistd.h>
++
++#define CHECK(expr) do { if (!(expr)) { \
++    fprintf(stderr, "Failed at %d: %s\n", __LINE__, #expr); exit(1); } } while (0)
++
++static uint32_t crc32_bytes(const void *data, size_t bytes) {
++    const unsigned char *p = data;
++    uint32_t crc = 0xFFFFFFFFu;
++    while (bytes--) {
++        crc ^= *p++;
++        for (int bit = 0; bit < 8; bit++)
++            crc = (crc >> 1) ^ (0xEDB88320u & (uint32_t)(-(int32_t)(crc & 1u)));
++    }
++    return ~crc;
++}
++
++typedef struct {
++    const char *word;
++    const char *phonetic;
++    const char *meaning;
++    const char *example_en;
++    const char *example_zh;
++    const char *root;
++    const char *group;
++} bank_row_t;
++
++static void put32(unsigned char *p, uint32_t v) { memcpy(p, &v, 4); }
++static void put16(unsigned char *p, uint16_t v) { memcpy(p, &v, 2); }
++
++static void write_bank(const char *dir, const bank_row_t *rows, size_t count) {
++    char path[512];
++    snprintf(path, sizeof(path), "%s/.thingsos", dir);
++    mkdir(path, 0775);
++    snprintf(path, sizeof(path), "%s/.thingsos/vocab", dir);
++    mkdir(path, 0775);
++    snprintf(path, sizeof(path), "%s/.thingsos/vocab/bank.bin", dir);
++    FILE *f = fopen(path, "wb");
++    CHECK(f != NULL);
++
++    const uint32_t index_off = 32;
++    const uint32_t strings_off = index_off + (uint32_t)(count * 28);
++    unsigned char *strings = calloc(1, 1 << 16);
++    size_t at = 1; /* 0 is a valid "empty string" offset */
++    uint32_t offsets[16][7];
++    for (size_t i = 0; i < count && i < 16; i++) {
++        const char *fields[7] = {rows[i].word, rows[i].phonetic, rows[i].meaning,
++                                 rows[i].example_en, rows[i].example_zh,
++                                 rows[i].root, rows[i].group};
++        for (int k = 0; k < 7; k++) {
++            const char *s = fields[k] ? fields[k] : "";
++            offsets[i][k] = (uint32_t)at;
++            size_t n = strlen(s) + 1;
++            memcpy(strings + at, s, n);
++            at += n;
++        }
++    }
++
++    unsigned char head[32] = {0};
++    memcpy(head, "VOCB", 4);
++    put16(head + 4, 1);
++    put16(head + 6, (uint16_t)count);
++    put32(head + 8, index_off);
++    put32(head + 12, strings_off);
++    put32(head + 16, 0x5A5A1234u);
++    put32(head + 28, crc32_bytes(head, 28));
++    fwrite(head, 1, sizeof(head), f);
++
++    for (size_t i = 0; i < count && i < 16; i++) {
++        unsigned char entry[28] = {0};
++        put32(entry + 0, offsets[i][0]); /* word */
++        put32(entry + 4, offsets[i][2]); /* meaning */
++        put32(entry + 8, offsets[i][3]); /* example_en */
++        put32(entry + 12, offsets[i][4]); /* example_zh */
++        put32(entry + 16, offsets[i][5]); /* root */
++        put16(entry + 20, (uint16_t)offsets[i][1]); /* phonetic */
++        put16(entry + 22, (uint16_t)offsets[i][6]); /* group */
++        fwrite(entry, 1, sizeof(entry), f);
++    }
++    fwrite(strings, 1, at, f);
++    fclose(f);
++    free(strings);
++}
++
++int main(void) {
++    /* --- FSRS reference values (official defaults) --- */
++    vocab_fsrs_memory_t memory = {0};
++    vocab_fsrs_initial(3, &memory);
++    CHECK(fabsf(memory.stability - 2.3065f) < 1e-4f);
++    CHECK(fabsf(memory.difficulty - (6.4133f - expf(0.8334f * 2.0f) + 1.0f)) < 1e-4f);
++
++    vocab_fsrs_memory_t good = {2.3065f, 2.1185f};
++    vocab_fsrs_review(&good, 5.0f, 3, 0);
++    CHECK(good.stability > 2.3065f); /* a successful review grows stability */
++    vocab_fsrs_memory_t again = {10.0f, 5.0f};
++    vocab_fsrs_review(&again, 10.0f, 1, 0);
++    CHECK(again.stability < 10.0f); /* forgetting shortens stability */
++
++    /* Interval grows with stability and shrinks with higher retention. */
++    CHECK(vocab_fsrs_interval(10.0f, 0.9f) > vocab_fsrs_interval(2.0f, 0.9f));
++    CHECK(vocab_fsrs_interval(10.0f, 0.95f) < vocab_fsrs_interval(10.0f, 0.80f));
++    CHECK(vocab_fsrs_retrievability(10.0f, 0.0f) > 0.999f);
++    CHECK(vocab_fsrs_retrievability(10.0f, 10.0f) > 0.85f &&
++          vocab_fsrs_retrievability(10.0f, 10.0f) < 0.95f);
++
++    /* --- time helpers --- */
++    const uint32_t day = vocab_date_to_day(20261117);
++    CHECK(vocab_day_to_date(day) == 20261117);
++    CHECK(vocab_minutes_from_epoch(20261117, 9, 30) == day * 1440 + 9 * 60 + 30);
++
++    /* --- bank + session --- */
++    char root[256];
++    snprintf(root, sizeof(root), "/tmp/vocab-test-%d", (int)getpid());
++    char cmd[512];
++    snprintf(cmd, sizeof(cmd), "rm -rf %s", root);
++    CHECK(system(cmd) == 0);
++    snprintf(cmd, sizeof(cmd), "mkdir -p %s", root);
++    CHECK(system(cmd) == 0);
++
++    static const bank_row_t rows[] = {
++        {"apple", "/ˈæpl/", "苹果", "I ate an apple.", "我吃了个苹果。", "a-pple", "L1"},
++        {"abandon", "/əˈbændən/", "放弃", "He abandoned it.", "他放弃了。", "a-bandon", "L1"},
++        {"benefit", "/ˈbenɪfɪt/", "好处", "It is a benefit.", "这是个好处。", "bene", "L2"},
++    };
++    write_bank(root, rows, 3);
++
++    const uint32_t now = vocab_minutes_from_epoch(20261117, 8, 0);
++    vocab_config_t cfg;
++    vocab_config_defaults(&cfg);
++    cfg.new_limit = 3;
++    cfg.review_limit = 10;
++
++    CHECK(vocab_open(root, now));
++    CHECK(vocab_count() == 3);
++    CHECK(vocab_begin_day(now, &cfg));
++
++    vocab_card_t card;
++    vocab_card_stage_t stage;
++    CHECK(vocab_next(&card, &stage));
++    CHECK(strcmp(card.word, "apple") == 0);
++    CHECK(strcmp(card.meaning, "苹果") == 0);
++    CHECK(stage == VOCAB_STAGE_WORD);
++    const uint32_t first_id = card.id;
++    CHECK(vocab_current_id() == first_id);
++    vocab_reveal();
++    CHECK(vocab_current_revealed());
++
++    /* Good on a new card: stays learning, due in 10 minutes. */
++    CHECK(vocab_answer(now, VOCAB_GOOD));
++    vocab_stats_t stats;
++    CHECK(vocab_stats(now, &stats));
++    CHECK(stats.new_today == 1);
++    CHECK(stats.reviews_today == 1);
++
++    /* Undo restores the card and counters. */
++    CHECK(vocab_undo(now));
++    CHECK(vocab_stats(now, &stats));
++    CHECK(stats.new_today == 0);
++
++    /* Answer again and let it graduate with Easy. */
++    CHECK(vocab_next(&card, &stage));
++    CHECK(vocab_answer(now, VOCAB_EASY));
++
++    /* Second card: Again -> learning with a short step. */
++    CHECK(vocab_next(&card, &stage));
++    const uint32_t second_id = card.id;
++    CHECK(vocab_answer(now, VOCAB_AGAIN));
++
++    /* Third card: Hard -> stays learning. */
++    CHECK(vocab_next(&card, &stage));
++    CHECK(vocab_answer(now, VOCAB_HARD));
++
++    /* Soon after, due-now cards should not be served before their step. */
++    CHECK(!vocab_next(&card, &stage));
++
++    /* Persistence: reopen and check the counters survived via state+journal. */
++    vocab_close(now);
++    CHECK(vocab_open(root, now));
++    CHECK(vocab_stats(now, &stats));
++    CHECK(stats.reviews_today >= 3);
++
++    /* Later the same day the learning steps become due again. */
++    const uint32_t later = now + 11;
++    CHECK(vocab_begin_day(later, &cfg));
++    CHECK(vocab_next(&card, &stage));
++    CHECK(card.id == second_id || card.id == first_id || card.id == 0xFFFFFFFFu);
++
++    /* Classic mode uses the fixed Ebbinghaus table. */
++    vocab_config_t classic = cfg;
++    classic.mode = VOCAB_MODE_CLASSIC;
++    CHECK(vocab_config_save(root, &classic));
++    vocab_config_t loaded;
++    CHECK(vocab_config_load(root, &loaded));
++    CHECK(loaded.mode == VOCAB_MODE_CLASSIC);
++
++    vocab_close(later);
++
++    /* Corrupt state must not crash: open falls back to a fresh session. */
++    snprintf(cmd, sizeof(cmd), "%s/.thingsos/vocab/state.dat", root);
++    FILE *f = fopen(cmd, "wb");
++    CHECK(f != NULL);
++    fputs("broken", f);
++    fclose(f);
++    CHECK(vocab_open(root, now));
++    CHECK(vocab_count() == 3);
++    vocab_close(now);
++
++    snprintf(cmd, sizeof(cmd), "rm -rf %s", root);
++    CHECK(system(cmd) == 0);
++
++    /* Optional: validate a real packed bundle (VOCAB_TEST_ROOT points at the
++       directory that contains .thingsos/vocab, i.e. the SD root). */
++    const char *external = getenv("VOCAB_TEST_ROOT");
++    if (external && *external) {
++        CHECK(vocab_open(external, now));
++        CHECK(vocab_count() > 0);
++        vocab_config_defaults(&cfg);
++        CHECK(vocab_begin_day(now, &cfg));
++        CHECK(vocab_next(&card, &stage));
++        CHECK(card.word[0] != 0);
++        CHECK(card.meaning[0] != 0);
++        char audio[256];
++        const bool has_audio = vocab_audio_path(card.id, audio, sizeof(audio));
++        printf("external bundle: %u cards, first '%s' (%s), stage %d\n",
++               (unsigned)vocab_count(), card.word, has_audio ? "audio" : "no audio",
++               (int)stage);
++        vocab_close(now);
++    }
++    printf("vocab tests passed\n");
++    return 0;
++}
+-- 
+2.50.1 (Apple Git-155)
+
