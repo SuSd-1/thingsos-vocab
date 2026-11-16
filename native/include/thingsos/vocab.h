@@ -1,0 +1,121 @@
+// SPDX-License-Identifier: Apache-2.0
+/* Offline word-card learning: FSRS-6 scheduling on top of a small on-SD bank.
+ *
+ * The core is plain C with stdio only, so the same code runs on the device and
+ * in host tests. All persistent files live under <root>/.thingsos/vocab/.
+ * Time is "minutes since 2020-01-01 00:00 local": minute precision is needed
+ * for the 1/10 minute learning steps, day precision for review intervals.
+ */
+#pragma once
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#define VOCAB_WORD_BYTES 64
+#define VOCAB_PHONETIC_BYTES 64
+#define VOCAB_MEANING_BYTES 256
+#define VOCAB_EXAMPLE_BYTES 384
+#define VOCAB_ROOT_BYTES 96
+#define VOCAB_GROUP_BYTES 24
+
+#define VOCAB_MAX_CARDS 100000u
+#define VOCAB_MINUTE_PER_DAY 1440u
+
+typedef enum {
+    VOCAB_STATE_NEW = 0,
+    VOCAB_STATE_LEARNING = 1,
+    VOCAB_STATE_REVIEW = 2,
+    VOCAB_STATE_RELEARNING = 3,
+} vocab_state_t;
+
+/* Grades map onto FSRS 1..4. */
+typedef enum {
+    VOCAB_AGAIN = 1,
+    VOCAB_HARD = 2,
+    VOCAB_GOOD = 3,
+    VOCAB_EASY = 4,
+} vocab_grade_t;
+
+typedef enum {
+    VOCAB_MODE_FSRS = 0,
+    VOCAB_MODE_CLASSIC = 1,
+} vocab_mode_t;
+
+typedef enum {
+    VOCAB_STAGE_WORD = 0,   /* word -> meaning */
+    VOCAB_STAGE_RECALL = 1, /* word -> recall meaning */
+    VOCAB_STAGE_AUDIO = 2,  /* listen -> meaning */
+} vocab_card_stage_t;
+
+typedef struct {
+    uint32_t id;
+    char word[VOCAB_WORD_BYTES];
+    char phonetic[VOCAB_PHONETIC_BYTES];
+    char meaning[VOCAB_MEANING_BYTES];
+    char example_en[VOCAB_EXAMPLE_BYTES];
+    char example_zh[VOCAB_EXAMPLE_BYTES];
+    char root[VOCAB_ROOT_BYTES];
+    char group[VOCAB_GROUP_BYTES];
+} vocab_card_t;
+
+typedef struct {
+    uint16_t new_today;
+    uint16_t due_today;
+    uint16_t reviews_today;
+    uint16_t streak;
+    uint32_t total;
+    uint32_t learned;
+    bool finished;
+} vocab_stats_t;
+
+typedef struct {
+    vocab_mode_t mode;
+    uint8_t target_percent; /* 80..95 */
+    uint16_t new_limit;
+    uint16_t review_limit;
+    bool auto_audio;
+} vocab_config_t;
+
+/* 24 bytes, persisted as-is. */
+typedef struct {
+    uint16_t reps;
+    uint16_t lapses;
+    uint32_t due_min;  /* 0 = new / not scheduled */
+    uint32_t last_min;
+    uint16_t elapsed;  /* days since last review, cached */
+    float stability;
+    float difficulty;
+    uint8_t state;
+    uint8_t flags;
+} vocab_state_record_t;
+
+/* Lifecycle. root is the SD mount point ("/sdcard"). */
+bool vocab_open(const char *root, uint32_t now_min);
+void vocab_close(uint32_t now_min);
+bool vocab_opened(void);
+uint32_t vocab_count(void);
+
+/* Daily session. */
+bool vocab_begin_day(uint32_t now_min, const vocab_config_t *cfg);
+bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage);
+bool vocab_answer(uint32_t now_min, vocab_grade_t grade);
+bool vocab_undo(uint32_t now_min);
+bool vocab_stats(uint32_t now_min, vocab_stats_t *out);
+bool vocab_audio_path(uint32_t id, char *buf, size_t bytes);
+uint32_t vocab_current_id(void);
+vocab_card_stage_t vocab_current_stage(void);
+bool vocab_current_revealed(void);
+void vocab_reveal(void);
+
+/* Settings. */
+void vocab_config_defaults(vocab_config_t *cfg);
+bool vocab_config_load(const char *root, vocab_config_t *cfg);
+bool vocab_config_save(const char *root, const vocab_config_t *cfg);
+
+/* Log export for offline weight optimisation (best effort). */
+bool vocab_export_log(const char *path);
+
+/* Time helpers (YYYYMMDD <-> minutes since 2020-01-01). */
+uint32_t vocab_date_to_day(uint32_t yyyymmdd);
+uint32_t vocab_day_to_date(uint32_t day);
+uint32_t vocab_minutes_from_epoch(uint32_t yyyymmdd, unsigned hour, unsigned minute);
