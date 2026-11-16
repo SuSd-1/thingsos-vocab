@@ -27,7 +27,7 @@ import sys
 import zlib
 from pathlib import Path
 
-VERSION = 1
+VERSION = 3  # bank format: 32-byte index entries, 8 x uint32 (incl. pos)
 HEADER = 32
 INDEX_ENTRY = 28
 COLUMNS = ["word", "phonetic", "pos", "meaning", "example_en", "example_zh", "root", "group"]
@@ -97,9 +97,9 @@ def build_bank(rows: list[dict[str, str]]) -> bytes:
     index = bytearray()
     for entry in offsets:
         index += struct.pack(
-            "<IIIIIHH",
+            "<IIIIIIII",
             entry["word"], entry["meaning"], entry["example_en"], entry["example_zh"],
-            entry["root"], entry["phonetic"], entry["group"],
+            entry["root"], entry["phonetic"], entry["group"], entry["pos"],
         )
 
     index_off = HEADER

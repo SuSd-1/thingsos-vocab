@@ -22,7 +22,8 @@
 #define VOCAB_BANK_MAGIC "VOCB"
 #define VOCAB_CONFIG_MAGIC "VOCC"
 #define VOCAB_VERSION 1u
-#define VOCAB_INDEX_ENTRY 28u
+#define VOCAB_BANK_VERSION 3u
+#define VOCAB_INDEX_ENTRY 32u
 #define VOCAB_JOURNAL_ENTRY 32u
 #define VOCAB_CONFIG_BYTES 16u
 #define VOCAB_UNDO_DEPTH 16u
@@ -46,8 +47,9 @@ typedef struct {
     uint32_t example_en_off;
     uint32_t example_zh_off;
     uint32_t root_off;
-    uint16_t phonetic_off;
-    uint16_t group_off;
+    uint32_t phonetic_off;
+    uint32_t group_off;
+    uint32_t pos_off;
 } vocab_index_t;
 
 typedef struct {
@@ -241,8 +243,9 @@ static bool read_index(uint32_t id, vocab_index_t *index) {
     memcpy(&index->example_en_off, raw + 8, 4);
     memcpy(&index->example_zh_off, raw + 12, 4);
     memcpy(&index->root_off, raw + 16, 4);
-    memcpy(&index->phonetic_off, raw + 20, 2);
-    memcpy(&index->group_off, raw + 22, 2);
+    memcpy(&index->phonetic_off, raw + 20, 4);
+    memcpy(&index->group_off, raw + 24, 4);
+    memcpy(&index->pos_off, raw + 28, 4);
     return true;
 }
 
@@ -257,7 +260,7 @@ static bool bank_open(void) {
     uint16_t version = 0, count = 0;
     memcpy(&version, head + 4, 2);
     memcpy(&count, head + 6, 2);
-    if (version != VOCAB_VERSION || count == 0 || count > 20000u) return false;
+    if (version != VOCAB_BANK_VERSION || count == 0 || count > 20000u) return false;
     memcpy(&g_bank.index_off, head + 8, 4);
     memcpy(&g_bank.strings_off, head + 12, 4);
     memcpy(&g_bank.bank_hash, head + 16, 4);
@@ -418,13 +421,26 @@ static void log_review(uint32_t id, int grade, uint32_t now_min,
 
 /* -------------------------------------------------------------- scheduling */
 
-static uint32_t graduate_days(const vocab_config_t *cfg, float stability) {
+/* flags bits 0-1: learning stage (0 quiz, 1 example, 2 bare word). */
+#define VOCAB_LEVEL_OF(record) ((record)->flags & 0x03u)
+
+static uint32_t review_days(const vocab_config_t *cfg, vocab_state_record_t *record,
+                            float stability, vocab_grade_t grade) {
+    if (cfg->mode == VOCAB_MODE_CLASSIC) {
+        static const uint16_t table[8] = {1, 1, 2, 4, 7, 15, 30, 60};
+        unsigned step = record->reps < 7 ? record->reps : 7;
+        if (grade == VOCAB_GOOD) step = step + 1 > 7 ? 7 : step + 1;
+        if (grade == VOCAB_EASY) step = step + 2 > 7 ? 7 : step + 2;
+        return table[step];
+    }
     float days = vocab_fsrs_interval(stability, (float)cfg->target_percent / 100.0f);
     if (days < 1.0f) days = 1.0f;
     return (uint32_t)days;
 }
 
-static void schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
+/* One answer in either the learning ladder (level 0..2) or review.
+ * Returns true when the card graduated into review during this answer. */
+static bool schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
                             uint32_t now_min, const vocab_config_t *cfg) {
     const uint32_t day = now_min / VOCAB_MINUTE_PER_DAY;
     uint32_t elapsed_min = record->last_min && now_min > record->last_min
@@ -433,82 +449,79 @@ static void schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
     uint16_t elapsed_days = (uint16_t)(elapsed_min / VOCAB_MINUTE_PER_DAY);
     const bool same_day = record->last_min != 0 && elapsed_min > 0 &&
                           elapsed_min < VOCAB_MINUTE_PER_DAY;
-
-    if (cfg->mode == VOCAB_MODE_CLASSIC) {
-        static const uint16_t table[8] = {1, 1, 2, 4, 7, 15, 30, 60};
-        unsigned step = record->reps;
-        if (record->state == VOCAB_STATE_NEW) step = 0;
-        uint32_t days;
-        if (grade == VOCAB_AGAIN) {
-            step = 0;
-            record->state = record->state == VOCAB_STATE_REVIEW ||
-                                    record->state == VOCAB_STATE_RELEARNING
-                                ? VOCAB_STATE_RELEARNING
-                                : VOCAB_STATE_LEARNING;
-            record->due_min = now_min + VOCAB_RELEARN_MIN;
-            record->lapses++;
-            days = 0;
-        } else {
-            if (grade == VOCAB_HARD) {
-                days = table[step < 8 ? step : 7] > 1 ? table[step < 8 ? step : 7] / 2 : 1;
-            } else if (grade == VOCAB_GOOD) {
-                step = step + 1 > 7 ? 7 : step + 1;
-                days = table[step];
-            } else {
-                step = step + 2 > 7 ? 7 : step + 2;
-                days = table[step];
-            }
-            record->state = VOCAB_STATE_REVIEW;
-            record->due_min = now_min + days * VOCAB_MINUTE_PER_DAY;
-        }
-        record->reps = (uint16_t)step;
-        record->last_min = now_min;
-        record->elapsed = elapsed_days;
-        return;
-    }
-
-    vocab_fsrs_memory_t memory = {record->stability, record->difficulty};
-    if (record->state == VOCAB_STATE_NEW) {
-        vocab_fsrs_initial((int)grade, &memory);
-    } else {
-        float elapsed = same_day ? 0.0f : (elapsed_days ? (float)elapsed_days : 1.0f);
-        vocab_fsrs_review(&memory, elapsed, (int)grade, same_day ? 1 : 0);
-    }
-
     const bool learning = record->state == VOCAB_STATE_NEW ||
                           record->state == VOCAB_STATE_LEARNING ||
                           record->state == VOCAB_STATE_RELEARNING;
+    uint8_t level = VOCAB_LEVEL_OF(record);
+
+    vocab_fsrs_memory_t memory = {record->stability, record->difficulty};
+
     if (learning) {
         if (grade == VOCAB_AGAIN) {
+            level = 0;
             record->state = record->state == VOCAB_STATE_NEW ? VOCAB_STATE_LEARNING
                                                              : VOCAB_STATE_RELEARNING;
-            record->due_min = now_min + VOCAB_LEARN_AGAIN_MIN;
+            record->due_min = now_min + 1;
             record->lapses++;
         } else if (grade == VOCAB_HARD) {
-            record->due_min = now_min + VOCAB_LEARN_GOOD_MIN / 2;
+            record->due_min = now_min + 5;
             if (record->state == VOCAB_STATE_NEW) record->state = VOCAB_STATE_LEARNING;
-        } else if (grade == VOCAB_GOOD && record->state == VOCAB_STATE_NEW) {
-            record->state = VOCAB_STATE_LEARNING;
-            record->due_min = now_min + VOCAB_LEARN_GOOD_MIN;
         } else {
-            record->state = VOCAB_STATE_REVIEW;
-            record->due_min =
-                now_min + graduate_days(cfg, memory.stability) * VOCAB_MINUTE_PER_DAY;
+            if (level < 2) {
+                level++;
+                record->due_min = now_min + 5;
+                if (record->state == VOCAB_STATE_NEW) record->state = VOCAB_STATE_LEARNING;
+            } else {
+                /* Graduation: one FSRS review with a passing grade. */
+                if (record->state == VOCAB_STATE_NEW) {
+                    vocab_fsrs_initial((int)VOCAB_GOOD, &memory);
+                } else {
+                    float elapsed = same_day ? 0.0f
+                                             : (elapsed_days ? (float)elapsed_days : 1.0f);
+                    vocab_fsrs_review(&memory, elapsed, (int)VOCAB_GOOD, same_day ? 1 : 0);
+                }
+                const uint32_t days = review_days(cfg, record, memory.stability, VOCAB_GOOD);
+                record->state = VOCAB_STATE_REVIEW;
+                record->due_min = now_min + days * VOCAB_MINUTE_PER_DAY;
+                record->flags = 0;
+                record->stability = memory.stability;
+                record->difficulty = memory.difficulty;
+                record->reps++;
+                record->last_min = now_min;
+                record->elapsed = elapsed_days;
+                return true;
+            }
         }
-    } else if (grade == VOCAB_AGAIN) {
-        record->state = VOCAB_STATE_RELEARNING;
-        record->lapses++;
-        record->due_min = now_min + VOCAB_RELEARN_MIN;
-    } else {
-        record->due_min =
-            now_min + graduate_days(cfg, memory.stability) * VOCAB_MINUTE_PER_DAY;
+        record->flags = (uint8_t)((record->flags & ~0x03u) | level);
+        record->last_min = now_min;
+        record->elapsed = elapsed_days;
+        (void)day;
+        return false;
     }
 
-    record->stability = memory.stability;
-    record->difficulty = memory.difficulty;
-    record->reps++;
-    record->last_min = now_min;
-    record->elapsed = elapsed_days;
+    /* Review: FSRS (or the classic table) decides the next interval. */
+    {
+        float elapsed = same_day ? 0.0f : (elapsed_days ? (float)elapsed_days : 1.0f);
+        vocab_fsrs_review(&memory, elapsed, (int)grade, same_day ? 1 : 0);
+        const uint32_t days = review_days(cfg, record, memory.stability, grade);
+        record->stability = memory.stability;
+        record->difficulty = memory.difficulty;
+        record->due_min = now_min + days * VOCAB_MINUTE_PER_DAY;
+        if (grade == VOCAB_AGAIN || grade == VOCAB_HARD) {
+            /* 模糊/不认识: strengthen with the 3-stage ladder right away. */
+            record->state = VOCAB_STATE_RELEARNING;
+            record->flags = 0;
+            record->lapses += grade == VOCAB_AGAIN ? 1 : 0;
+            record->due_min = now_min + 1;
+        } else {
+            record->state = VOCAB_STATE_REVIEW;
+            record->flags = 0;
+        }
+        record->reps++;
+        record->last_min = now_min;
+        record->elapsed = elapsed_days;
+    }
+    return false;
 }
 
 /* ------------------------------------------------------------------ queue */
@@ -518,23 +531,38 @@ static void queue_push(uint32_t id) {
     g_queue[g_queue_len++] = id;
 }
 
-static void queue_build(uint32_t now_min, const vocab_config_t *cfg) {
+static void queue_build(uint32_t now_min, const vocab_config_t *cfg, int focus) {
     g_queue_len = 0;
     g_queue_pos = 0;
     if (!g_queue || !g_records) return;
     uint32_t new_added = 0, due_added = 0;
+    if (focus != 1 && focus != 3) {
+        for (uint32_t i = 0; i < g_count; i++) {
+            vocab_state_record_t *record = &g_records[i];
+            if (record->state == VOCAB_STATE_REVIEW && record->due_min &&
+                record->due_min <= now_min) {
+                if (due_added < cfg->review_limit) {
+                    queue_push(i);
+                    due_added++;
+                }
+            }
+        }
+    }
+    if (focus == 2) return;
     for (uint32_t i = 0; i < g_count; i++) {
         vocab_state_record_t *record = &g_records[i];
-        if (record->state != VOCAB_STATE_NEW && record->due_min && record->due_min <= now_min) {
+        if (record->state == VOCAB_STATE_LEARNING || record->state == VOCAB_STATE_RELEARNING) {
+            if (focus == 3 && record->state != VOCAB_STATE_RELEARNING) continue;
+            if (record->due_min && record->due_min > now_min) continue;
             if (due_added < cfg->review_limit) {
                 queue_push(i);
                 due_added++;
             }
         }
     }
+    if (focus == 3) return;
     for (uint32_t i = 0; i < g_count && new_added < cfg->new_limit; i++) {
         if (g_records[i].state == VOCAB_STATE_NEW) {
-            /* Interleave new cards after the first few due cards. */
             queue_push(i);
             new_added++;
         }
@@ -608,7 +636,22 @@ bool vocab_begin_day(uint32_t now_min, const vocab_config_t *cfg) {
         g_new_today = 0;
         g_reviews_today = 0;
     }
-    queue_build(now_min, &g_config);
+    queue_build(now_min, &g_config, 0);
+    return true;
+}
+
+bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus) {
+    if (!g_open) return false;
+    if (cfg) g_config = *cfg;
+    g_now = now_min;
+    const uint32_t day = now_min / VOCAB_MINUTE_PER_DAY;
+    if (day != g_last_day) {
+        g_streak = (g_last_day && day == g_last_day + 1) ? (uint16_t)(g_streak + 1) : 1;
+        g_last_day = day;
+        g_new_today = 0;
+        g_reviews_today = 0;
+    }
+    queue_build(now_min, &g_config, focus);
     return true;
 }
 
@@ -643,13 +686,16 @@ bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage) {
         read_string(index.example_zh_off, out->example_zh, sizeof(out->example_zh));
         read_string(index.root_off, out->root, sizeof(out->root));
         read_string(index.group_off, out->group, sizeof(out->group));
+        read_string(index.pos_off, out->pos, sizeof(out->pos));
 
-        if (record->state == VOCAB_STATE_NEW) {
-            g_stage = VOCAB_STAGE_WORD;
-        } else if (record->state == VOCAB_STATE_REVIEW && (record->reps % 3u) == 1u) {
-            g_stage = VOCAB_STAGE_AUDIO;
+        if (record->state == VOCAB_STATE_NEW || record->state == VOCAB_STATE_LEARNING ||
+            record->state == VOCAB_STATE_RELEARNING) {
+            const uint8_t level = record->flags & 0x03u;
+            g_stage = level == 0 ? VOCAB_STAGE_QUIZ
+                      : level == 1 ? VOCAB_STAGE_RECALL
+                                   : VOCAB_STAGE_WORD;
         } else {
-            g_stage = VOCAB_STAGE_RECALL;
+            g_stage = VOCAB_STAGE_WORD; /* review always asks for the bare word */
         }
         if (stage) *stage = g_stage;
         return true;
@@ -739,6 +785,68 @@ bool vocab_audio_path(uint32_t id, char *buf, size_t bytes) {
 }
 
 uint32_t vocab_current_id(void) { return g_current_valid ? g_current : 0xFFFFFFFFu; }
+
+uint32_t vocab_new_count(void) {
+    uint32_t fresh = 0;
+    for (uint32_t i = 0; i < g_count; i++)
+        if (g_records[i].state == VOCAB_STATE_NEW) fresh++;
+    return fresh;
+}
+
+uint32_t vocab_learned_count(void) {
+    uint32_t learned = 0;
+    for (uint32_t i = 0; i < g_count; i++)
+        if (g_records[i].state == VOCAB_STATE_REVIEW) learned++;
+    return learned;
+}
+
+uint8_t vocab_current_level(void) {
+    return g_current_valid ? (uint8_t)(g_records[g_current].flags & 0x03u) : 0;
+}
+
+/* Deterministic distractors: same-ish meaning length, different first glyph. */
+bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]) {
+    if (!out || !g_count || id >= g_count) return false;
+    vocab_index_t self;
+    if (!read_index(id, &self)) return false;
+    char target[VOCAB_MEANING_BYTES];
+    read_string(self.meaning_off, target, sizeof(target));
+    const size_t want = strlen(target);
+    unsigned found = 0;
+    for (uint32_t step = 1; step < g_count && found < 3; step++) {
+        const uint32_t candidate = (id + step * 7u) % g_count;
+        if (candidate == id) continue;
+        vocab_index_t other;
+        if (!read_index(candidate, &other)) continue;
+        char meaning[VOCAB_MEANING_BYTES];
+        read_string(other.meaning_off, meaning, sizeof(meaning));
+        const size_t have = strlen(meaning);
+        if (have == 0 || (target[0] && meaning[0] == target[0])) continue;
+        if (have + 4 < want || have > want + 8) continue;
+        bool dup = false;
+        for (unsigned k = 0; k < found; k++)
+            if (!strcmp(out[k], meaning)) dup = true;
+        if (dup) continue;
+        snprintf(out[found], VOCAB_MEANING_BYTES, "%s", meaning);
+        found++;
+    }
+    for (uint32_t step = 1; step < g_count && found < 3; step++) {
+        const uint32_t candidate = (id + step * 13u) % g_count;
+        if (candidate == id) continue;
+        vocab_index_t other;
+        if (!read_index(candidate, &other)) continue;
+        char meaning[VOCAB_MEANING_BYTES];
+        read_string(other.meaning_off, meaning, sizeof(meaning));
+        if (!meaning[0]) continue;
+        bool dup = false;
+        for (unsigned k = 0; k < found; k++)
+            if (!strcmp(out[k], meaning)) dup = true;
+        if (dup) continue;
+        snprintf(out[found], VOCAB_MEANING_BYTES, "%s", meaning);
+        found++;
+    }
+    return found == 3;
+}
 vocab_card_stage_t vocab_current_stage(void) { return g_stage; }
 bool vocab_current_revealed(void) { return g_revealed; }
 void vocab_reveal(void) { g_revealed = true; }

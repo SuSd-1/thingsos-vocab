@@ -47,7 +47,7 @@ static void write_bank(const char *dir, const bank_row_t *rows, size_t count) {
     CHECK(f != NULL);
 
     const uint32_t index_off = 32;
-    const uint32_t strings_off = index_off + (uint32_t)(count * 28);
+    const uint32_t strings_off = index_off + (uint32_t)(count * 32);
     unsigned char *strings = calloc(1, 1 << 16);
     size_t at = 1; /* 0 is a valid "empty string" offset */
     uint32_t offsets[16][7];
@@ -66,7 +66,7 @@ static void write_bank(const char *dir, const bank_row_t *rows, size_t count) {
 
     unsigned char head[32] = {0};
     memcpy(head, "VOCB", 4);
-    put16(head + 4, 1);
+    put16(head + 4, 3); /* bank format version */
     put16(head + 6, (uint16_t)count);
     put32(head + 8, index_off);
     put32(head + 12, strings_off);
@@ -75,14 +75,15 @@ static void write_bank(const char *dir, const bank_row_t *rows, size_t count) {
     fwrite(head, 1, sizeof(head), f);
 
     for (size_t i = 0; i < count && i < 16; i++) {
-        unsigned char entry[28] = {0};
+        unsigned char entry[32] = {0};
         put32(entry + 0, offsets[i][0]); /* word */
         put32(entry + 4, offsets[i][2]); /* meaning */
         put32(entry + 8, offsets[i][3]); /* example_en */
         put32(entry + 12, offsets[i][4]); /* example_zh */
         put32(entry + 16, offsets[i][5]); /* root */
-        put16(entry + 20, (uint16_t)offsets[i][1]); /* phonetic */
-        put16(entry + 22, (uint16_t)offsets[i][6]); /* group */
+        put32(entry + 20, offsets[i][1]); /* phonetic */
+        put32(entry + 24, offsets[i][6]); /* group */
+        put32(entry + 28, offsets[i][1]); /* pos: reuse phonetic string in the fixture */
         fwrite(entry, 1, sizeof(entry), f);
     }
     fwrite(strings, 1, at, f);
@@ -129,69 +130,85 @@ int main(void) {
         {"apple", "/ˈæpl/", "苹果", "I ate an apple.", "我吃了个苹果。", "a-pple", "L1"},
         {"abandon", "/əˈbændən/", "放弃", "He abandoned it.", "他放弃了。", "a-bandon", "L1"},
         {"benefit", "/ˈbenɪfɪt/", "好处", "It is a benefit.", "这是个好处。", "bene", "L2"},
+        {"comfort", "/ˈkʌmfət/", "舒适", "A quiet comfort.", "一种安静的舒适。", "com-fort", "L2"},
+        {"deliver", "/dɪˈlɪvə/", "递送", "Deliver the parcel.", "递送包裹。", "de-liver", "L2"},
+        {"evident", "/ˈevɪdənt/", "明显的", "It is evident.", "这很明显。", "e-vid", "L3"},
     };
-    write_bank(root, rows, 3);
+    write_bank(root, rows, 6);
 
     const uint32_t now = vocab_minutes_from_epoch(20261117, 8, 0);
     vocab_config_t cfg;
     vocab_config_defaults(&cfg);
-    cfg.new_limit = 3;
+    cfg.new_limit = 6;
     cfg.review_limit = 10;
 
     CHECK(vocab_open(root, now));
-    CHECK(vocab_count() == 3);
+    CHECK(vocab_count() == 6);
     CHECK(vocab_begin_day(now, &cfg));
 
     vocab_card_t card;
     vocab_card_stage_t stage;
+    vocab_stats_t stats;
+
+    /* Stage 1: four-choice quiz on a brand new card. */
     CHECK(vocab_next(&card, &stage));
     CHECK(strcmp(card.word, "apple") == 0);
     CHECK(strcmp(card.meaning, "苹果") == 0);
-    CHECK(stage == VOCAB_STAGE_WORD);
+    CHECK(stage == VOCAB_STAGE_QUIZ);
     const uint32_t first_id = card.id;
-    CHECK(vocab_current_id() == first_id);
+    CHECK(vocab_current_level() == 0);
     vocab_reveal();
-    CHECK(vocab_current_revealed());
 
-    /* Good on a new card: stays learning, due in 10 minutes. */
+    char distractors[3][VOCAB_MEANING_BYTES];
+    CHECK(vocab_distractors(first_id, distractors));
+    CHECK(distractors[0][0] != 0 && strcmp(distractors[0], "苹果") != 0);
+
     CHECK(vocab_answer(now, VOCAB_GOOD));
-    vocab_stats_t stats;
     CHECK(vocab_stats(now, &stats));
     CHECK(stats.new_today == 1);
-    CHECK(stats.reviews_today == 1);
+    CHECK(vocab_learned_count() == 0); /* not graduated yet */
 
-    /* Undo restores the card and counters. */
+    /* Undo restores the ladder and counters, then replay the answer. */
     CHECK(vocab_undo(now));
     CHECK(vocab_stats(now, &stats));
     CHECK(stats.new_today == 0);
+    CHECK(vocab_current_level() == 0);
+    CHECK(vocab_answer(now, VOCAB_GOOD));
 
-    /* Answer again and let it graduate with Easy. */
+    /* Next stage after the 5-minute step: word + example recall. */
+    uint32_t t = now + 6;
+    CHECK(vocab_begin_day(t, &cfg));
     CHECK(vocab_next(&card, &stage));
-    CHECK(vocab_answer(now, VOCAB_EASY));
+    CHECK(card.id == first_id);
+    CHECK(stage == VOCAB_STAGE_RECALL);
+    CHECK(vocab_current_level() == 1);
+    CHECK(vocab_answer(t, VOCAB_GOOD));
 
-    /* Second card: Again -> learning with a short step. */
+    /* Final stage: bare word, graduating into review. */
+    t += 6;
+    CHECK(vocab_begin_day(t, &cfg));
+    CHECK(vocab_next(&card, &stage));
+    CHECK(stage == VOCAB_STAGE_WORD);
+    CHECK(vocab_answer(t, VOCAB_GOOD));
+    CHECK(vocab_learned_count() == 1);
+
+    /* A second card answered Again restarts the ladder. */
     CHECK(vocab_next(&card, &stage));
     const uint32_t second_id = card.id;
-    CHECK(vocab_answer(now, VOCAB_AGAIN));
+    CHECK(vocab_answer(t, VOCAB_AGAIN));
+    CHECK(vocab_current_level() == 0);
 
-    /* Third card: Hard -> stays learning. */
+    /* A third card answered Hard keeps its stage. */
     CHECK(vocab_next(&card, &stage));
-    CHECK(vocab_answer(now, VOCAB_HARD));
+    CHECK(vocab_answer(t, VOCAB_HARD));
 
-    /* Soon after, due-now cards should not be served before their step. */
-    CHECK(!vocab_next(&card, &stage));
-
-    /* Persistence: reopen and check the counters survived via state+journal. */
-    vocab_close(now);
-    CHECK(vocab_open(root, now));
-    CHECK(vocab_stats(now, &stats));
+    /* Persistence: reopen, the graduated card is still learned. */
+    vocab_close(t);
+    CHECK(vocab_open(root, t));
+    CHECK(vocab_learned_count() == 1);
+    CHECK(vocab_stats(t, &stats));
     CHECK(stats.reviews_today >= 3);
-
-    /* Later the same day the learning steps become due again. */
-    const uint32_t later = now + 11;
-    CHECK(vocab_begin_day(later, &cfg));
-    CHECK(vocab_next(&card, &stage));
-    CHECK(card.id == second_id || card.id == first_id || card.id == 0xFFFFFFFFu);
+    (void)second_id;
 
     /* Classic mode uses the fixed Ebbinghaus table. */
     vocab_config_t classic = cfg;
@@ -201,7 +218,7 @@ int main(void) {
     CHECK(vocab_config_load(root, &loaded));
     CHECK(loaded.mode == VOCAB_MODE_CLASSIC);
 
-    vocab_close(later);
+    vocab_close(t);
 
     /* Corrupt state must not crash: open falls back to a fresh session. */
     snprintf(cmd, sizeof(cmd), "%s/.thingsos/vocab/state.dat", root);
@@ -210,7 +227,7 @@ int main(void) {
     fputs("broken", f);
     fclose(f);
     CHECK(vocab_open(root, now));
-    CHECK(vocab_count() == 3);
+    CHECK(vocab_count() == 6);
     vocab_close(now);
 
     snprintf(cmd, sizeof(cmd), "rm -rf %s", root);

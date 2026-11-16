@@ -17,6 +17,7 @@
 #define VOCAB_EXAMPLE_BYTES 384
 #define VOCAB_ROOT_BYTES 96
 #define VOCAB_GROUP_BYTES 24
+#define VOCAB_POS_BYTES 12
 
 #define VOCAB_MAX_CARDS 100000u
 #define VOCAB_MINUTE_PER_DAY 1440u
@@ -45,6 +46,7 @@ typedef enum {
     VOCAB_STAGE_WORD = 0,   /* word -> meaning */
     VOCAB_STAGE_RECALL = 1, /* word -> recall meaning */
     VOCAB_STAGE_AUDIO = 2,  /* listen -> meaning */
+    VOCAB_STAGE_QUIZ = 3,   /* four meanings, pick the right one */
 } vocab_card_stage_t;
 
 typedef struct {
@@ -56,6 +58,7 @@ typedef struct {
     char example_zh[VOCAB_EXAMPLE_BYTES];
     char root[VOCAB_ROOT_BYTES];
     char group[VOCAB_GROUP_BYTES];
+    char pos[VOCAB_POS_BYTES];
 } vocab_card_t;
 
 typedef struct {
@@ -97,12 +100,20 @@ uint32_t vocab_count(void);
 
 /* Daily session. */
 bool vocab_begin_day(uint32_t now_min, const vocab_config_t *cfg);
+/* focus: 0 mixed, 1 learning ladder (new/learning/relearning), 2 due reviews,
+ * 3 relearning booster only. */
+bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus);
 bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage);
 bool vocab_answer(uint32_t now_min, vocab_grade_t grade);
 bool vocab_undo(uint32_t now_min);
 bool vocab_stats(uint32_t now_min, vocab_stats_t *out);
 bool vocab_audio_path(uint32_t id, char *buf, size_t bytes);
 uint32_t vocab_current_id(void);
+uint32_t vocab_learned_count(void);
+uint32_t vocab_new_count(void);
+uint8_t vocab_current_level(void);
+/* Three meaning strings that are plausibly confusable with `id`. */
+bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]);
 vocab_card_stage_t vocab_current_stage(void);
 bool vocab_current_revealed(void);
 void vocab_reveal(void);
