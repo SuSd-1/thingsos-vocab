@@ -1,0 +1,15 @@
+{
+  "version": "0.2.0",
+  "previous_version": "0.1.9",
+  "changes": [
+    "Cubox 阅读同步：应用页新增 Cubox 入口，支持二维码扫码或局域网绑定账号、同步收藏列表、缓存图文与 Markdown 样式及正文字体，并记录独立阅读进度与时长。",
+    "微读多端进度同步：退出书籍后上报最新位置；其他设备更新云端进度后，仅在打开对应微读书籍时弹出更新确认提示，支持跳转云端进度或保留本机位置。",
+    "微读离线转码修复：损坏的本地缓存章节可自动触发有限次数重下恢复，兼容部分分部内容与图文混排目录定位，提升离线 EPUB 打包稳定性。",
+    "壁纸横竖屏适配：局域网上传壁纸按图片方向自适应 684×1216 或 1216×684；设备端支持横屏壁纸预览与 1216×684 横向锁屏缓存渲染。",
+    "图文与动图渲染：支持 GIF 多帧渲染及文章长图缩放查看，优化阅读与菜单切换时的前光与局部刷新表现。",
+    "官网反馈入口：官网安装说明与历史记录之间新增使用反馈问卷入口，桌面端可页面内展开填写，移动端跳转原问卷支持附件上传。"
+  ],
+  "scope": "Metalio E-Ink4-Plus 0.2.0 main and rescue; cumulative features and fixes since 0.1.9 including Cubox reading, WeRead multi-device progress sync/chapter repair, adaptive landscape/portrait wallpapers, GIF/image rendering, and website feedback. Read Pico remains independent.",
+  "acceptance_note": "The preceding 0.1.9 candidate (landscape wallpaper support and reading-only WeRead progress prompt) passed verified main/rescue installation, full 16 MiB Flash readback and 45-second startup health on COM5. The versioned 0.2.0 main and rescue images are separately built and packaged; Cubox account sync, GIF/long-image playback, weak-network recovery and long-term standby acceptance on 0.2.0 remain pending.",
+  "rescue_upgrade_note": "OTA updates main only. To update an older rescue environment, install the complete USB package; complete USB installation resets internal settings while retaining SD files."
+}
