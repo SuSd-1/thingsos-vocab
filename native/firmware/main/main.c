@@ -2117,6 +2117,7 @@ static bool app_cubox_region(void);
 static void app_cubox_presented(bool);
 static esp_err_t app_cubox_present(void);
 #include "apps_controls.inc"
+#include "vocab_ui.inc"
 #include "bluetooth_ui.inc"
 #include "ima_ui.inc"
 #include "cubox_ui.inc"
@@ -2987,6 +2988,7 @@ static void capacitive_key_dispatch(thingsos_key_action_t action) {
     if(bt_ui_key(action))return;
     if(ima_key(action))return;
     if(cubox_key(action))return;
+    if(vocab_key(action))return;
     if(app.jump_pending && action!=THINGSOS_KEY_NONE) {
         reader_jump_cancel();
         if(action!=THINGSOS_KEY_HOME)return;
