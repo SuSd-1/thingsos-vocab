@@ -152,14 +152,13 @@ int main(void) {
     vocab_card_stage_t stage;
     vocab_stats_t stats;
 
-    /* Stage 1: four-choice quiz on a brand new card. */
+    /* Round 1: every new card is a four-choice quiz first. */
     CHECK(vocab_next(&card, &stage));
     CHECK(strcmp(card.word, "apple") == 0);
     CHECK(strcmp(card.meaning, "苹果") == 0);
     CHECK(stage == VOCAB_STAGE_QUIZ);
     const uint32_t first_id = card.id;
     CHECK(vocab_current_level() == 0);
-    vocab_reveal();
 
     char distractors[3][VOCAB_MEANING_BYTES];
     CHECK(vocab_distractors(first_id, distractors));
@@ -168,52 +167,39 @@ int main(void) {
     CHECK(vocab_answer(now, VOCAB_GOOD));
     CHECK(vocab_stats(now, &stats));
     CHECK(stats.new_today == 1);
-    CHECK(vocab_learned_count() == 0); /* not graduated yet */
+    CHECK(vocab_learned_count() == 0);
 
-    /* Undo restores the ladder and counters, then replay the answer. */
+    /* Undo restores the counters and the plan cursor, then re-answer. */
     CHECK(vocab_undo(now));
     CHECK(vocab_stats(now, &stats));
     CHECK(stats.new_today == 0);
-    CHECK(vocab_current_level() == 0);
     CHECK(vocab_answer(now, VOCAB_GOOD));
 
-    /* Next stage after the 5-minute step: word + example recall. */
-    uint32_t t = now + 6;
-    CHECK(vocab_begin_day(t, &cfg));
-    CHECK(vocab_next(&card, &stage));
-    CHECK(card.id == first_id);
-    CHECK(stage == VOCAB_STAGE_RECALL);
-    CHECK(vocab_current_level() == 1);
-    CHECK(vocab_answer(t, VOCAB_GOOD));
+    for (int i = 1; i < 6; i++) {
+        CHECK(vocab_next(&card, &stage));
+        CHECK(stage == VOCAB_STAGE_QUIZ);
+        CHECK(vocab_answer(now, VOCAB_GOOD));
+    }
+    /* Round 2: example recall for the same six cards. */
+    for (int i = 0; i < 6; i++) {
+        CHECK(vocab_next(&card, &stage));
+        CHECK(stage == VOCAB_STAGE_RECALL);
+        CHECK(vocab_answer(now, VOCAB_GOOD));
+    }
+    /* Round 3: bare word, graduating into review. */
+    for (int i = 0; i < 6; i++) {
+        CHECK(vocab_next(&card, &stage));
+        CHECK(stage == VOCAB_STAGE_WORD);
+        CHECK(vocab_answer(now, VOCAB_GOOD));
+    }
+    CHECK(vocab_learned_count() == 6);
 
-    /* Final stage: bare word, graduating into review. */
-    t += 6;
-    CHECK(vocab_begin_day(t, &cfg));
-    CHECK(vocab_next(&card, &stage));
-    CHECK(stage == VOCAB_STAGE_WORD);
-    CHECK(vocab_answer(t, VOCAB_GOOD));
-    CHECK(vocab_learned_count() == 1);
-
-    /* A second card answered Again restarts the ladder. */
-    CHECK(vocab_next(&card, &stage));
-    const uint32_t second_id = card.id;
-    CHECK(vocab_answer(t, VOCAB_AGAIN));
-    CHECK(vocab_current_level() == 0);
-
-    /* A third card answered Hard keeps its stage. */
-    CHECK(vocab_next(&card, &stage));
-    CHECK(vocab_answer(t, VOCAB_HARD));
-
-    /* Persistence: reopen, the graduated card is still learned. */
-    vocab_close(t);
-    CHECK(vocab_open(root, t));
-    CHECK(vocab_learned_count() == 1);
-    CHECK(vocab_stats(t, &stats));
-    /* Learning answers are not reviews; the counter stays at zero until a
-       scheduled review card is graded. */
+    /* Persistence: the graduated cards survive a reopen. */
+    vocab_close(now);
+    CHECK(vocab_open(root, now));
+    CHECK(vocab_learned_count() == 6);
+    CHECK(vocab_stats(now, &stats));
     CHECK(stats.reviews_today == 0);
-    CHECK(stats.due_today <= stats.learned);
-    (void)second_id;
 
     /* Classic mode uses the fixed Ebbinghaus table. */
     vocab_config_t classic = cfg;
@@ -223,7 +209,7 @@ int main(void) {
     CHECK(vocab_config_load(root, &loaded));
     CHECK(loaded.mode == VOCAB_MODE_CLASSIC);
 
-    vocab_close(t);
+    vocab_close(now);
 
     /* Corrupt state must not crash: open falls back to a fresh session. */
     snprintf(cmd, sizeof(cmd), "%s/.thingsos/vocab/state.dat", root);

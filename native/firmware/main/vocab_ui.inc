@@ -96,8 +96,6 @@ static const char* vocab_phonetic_text(char* out, size_t bytes, const char* in) 
     return out;
 }
 
-static void vocab_back_row(void) { }
-
 /* header() ends with a 1-px grey rule at y=210; on e-ink it reads as a broken
    dotted line right above the word, so the vocab pages clear it. */
 static void vocab_header(const char* title) {
@@ -121,14 +119,6 @@ static void vocab_undo_icon(void) {
 
 
 
-static void vocab_bar(int y, unsigned done, unsigned total) {
-    thingsos_rect(&app.canvas, 36, y, 612, 18, 0);
-    thingsos_rect(&app.canvas, 38, y + 2, 608, 14, 235);
-    if (total) {
-        unsigned width = (unsigned)((uint64_t)608 * done / total);
-        if (width) thingsos_rect(&app.canvas, 38, y + 2, (int)width, 14, 120);
-    }
-}
 
 static size_t vocab_utf8_width(const char* s) {
     const unsigned char c = (unsigned char)*s;
@@ -384,18 +374,6 @@ static void vocab_start_booster(void) {
     }
 }
 
-static void vocab_do_undo(void) {
-    uint32_t now = vocab_now_min();
-    if (!vocab_undo(now)) return;
-    vocab_stats(now, &vu.stats);
-    if (vocab_current_card(&vu.card, &vu.stage)) {
-        vu.phase = VOCAB_PHASE_QUESTION;
-        vu.answered = false;
-        vu.answer_ok = false;
-        if (vu.stage == VOCAB_STAGE_QUIZ) vocab_build_quiz();
-        app.dirty = true;
-    }
-}
 
 /* Answer the current question, then show its answer screen. */
 static void vocab_submit(vocab_grade_t grade) {
@@ -526,18 +504,18 @@ static void vocab_draw_home(void) {
     const unsigned review_left = vu.stats.due_today > review_done
                                      ? vu.stats.due_today - review_done : 0;
     char line[64];
-    app_outline(36, 300, 300, 190);
-    app_outline(348, 300, 300, 190);
-    label("学习", 64, 368, 40, 240);
-    if (!learn_left && vu.stats.new_today) label("已完成", 64, 452, 36, 240);
-    else { snprintf(line, sizeof(line), "%u", learn_left); label(line, 64, 456, 64, 240); }
-    label("复习", 376, 368, 40, 240);
-    if (!review_left && vu.stats.due_today) label("已完成", 376, 452, 36, 240);
-    else { snprintf(line, sizeof(line), "%u", review_left); label(line, 376, 456, 64, 240); }
+    app_outline(36, 560, 300, 190);
+    app_outline(348, 560, 300, 190);
+    label("学习", 64, 628, 40, 240);
+    if (!learn_left && vu.stats.new_today) label("已完成", 64, 712, 36, 240);
+    else { snprintf(line, sizeof(line), "%u", learn_left); label(line, 64, 716, 64, 240); }
+    label("复习", 376, 628, 40, 240);
+    if (!review_left && vu.stats.due_today) label("已完成", 376, 712, 36, 240);
+    else { snprintf(line, sizeof(line), "%u", review_left); label(line, 376, 716, 64, 240); }
     snprintf(line, sizeof(line), "连续 %u 天 · 已学 %u / %u", (unsigned)vu.stats.streak,
              (unsigned)vocab_learned_count(), (unsigned)vocab_count());
-    label(line, 36, 570, 24, 612);
-    label("每日新词与复习上限在右上角「设置」里调整", 36, 620, 22, 612);
+    label(line, 36, 830, 24, 612);
+    label("每日新词与复习上限在右上角「设置」里调整", 36, 880, 22, 612);
 }
 
 static const char* const vocab_setting_names[11] = {
@@ -696,7 +674,6 @@ static bool vocab_draw(void) {
         return true;
     }
 
-    vocab_back_row();
     if (vu.screen == VOCAB_SCREEN_HOME) vocab_draw_bottom_bar(0);
     else if (vu.screen == VOCAB_SCREEN_STATS) vocab_draw_bottom_bar(1);
     else if (vu.screen == VOCAB_SCREEN_SETTINGS) vocab_draw_bottom_bar(2);
@@ -752,7 +729,7 @@ static bool vocab_tap(int x, int y) {
     }
     if (vu.screen == VOCAB_SCREEN_HOME) {
         if (x >= 580 && y < 205) { vu.screen = VOCAB_SCREEN_SETTINGS; app.dirty = true; return true; }
-        if (y >= 300 && y < 490) {
+        if (y >= 560 && y < 750) {
             if (x < 348) vocab_start_learn();
             else vocab_start_review();
             return true;

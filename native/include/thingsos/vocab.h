@@ -134,9 +134,6 @@ bool vocab_plan_progress(uint16_t *group, uint8_t *round, uint8_t *index, uint8_
                          uint8_t *phase);
 /* Three meaning strings that are plausibly confusable with `id`. */
 bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]);
-vocab_card_stage_t vocab_current_stage(void);
-bool vocab_current_revealed(void);
-void vocab_reveal(void);
 
 /* Settings. */
 void vocab_config_defaults(vocab_config_t *cfg);

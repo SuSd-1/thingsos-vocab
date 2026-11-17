@@ -87,14 +87,10 @@ static uint32_t g_bank_hash;
 static char g_root[160];
 static bool g_open;
 
-static uint32_t *g_queue;
-static uint32_t g_queue_len;
-static uint32_t g_queue_pos;
 static int g_focus;
 static bool g_exhausted;
 static uint32_t g_current;
 static bool g_current_valid;
-static bool g_revealed;
 static vocab_card_stage_t g_stage;
 
 static uint32_t g_now;
@@ -793,69 +789,6 @@ static bool plan_advance(uint32_t now_min) {
     return plan_build_learn(now_min);
 }
 
-static void queue_push(uint32_t id) {
-    if (!g_queue || g_queue_len >= g_count) return;
-    g_queue[g_queue_len++] = id;
-}
-
-static void queue_build(uint32_t now_min, const vocab_config_t *cfg, int focus) {
-    g_queue_len = 0;
-    g_queue_pos = 0;
-    if (!g_queue || !g_records) return;
-    uint32_t new_added = 0, due_added = 0;
-    if (focus != 1 && focus != 3) {
-        for (uint32_t i = 0; i < g_count; i++) {
-            vocab_state_record_t *record = &g_records[i];
-            if (record->state == VOCAB_STATE_REVIEW && record->due_min &&
-                record->due_min <= now_min) {
-                if (due_added < cfg->review_limit) {
-                    queue_push(i);
-                    due_added++;
-                }
-            }
-        }
-    }
-    if (focus == 1 || focus == 3) {
-        const uint32_t today = now_min / VOCAB_MINUTE_PER_DAY;
-        if (g_resume_id < g_count && g_resume_day == today) {
-            const vocab_state_record_t *resume = &g_records[g_resume_id];
-            if ((resume->state == VOCAB_STATE_LEARNING || resume->state == VOCAB_STATE_RELEARNING) &&
-                resume->due_min <= now_min) {
-                queue_push(g_resume_id);
-            }
-        }
-    }
-    if (focus == 2) return;
-    for (uint32_t i = 0; i < g_count; i++) {
-        vocab_state_record_t *record = &g_records[i];
-        if (record->state == VOCAB_STATE_LEARNING || record->state == VOCAB_STATE_RELEARNING) {
-            if (focus == 3 && record->state != VOCAB_STATE_RELEARNING) continue;
-            if (record->due_min && record->due_min > now_min) continue;
-            if (due_added < cfg->review_limit) {
-                queue_push(i);
-                due_added++;
-            }
-        }
-    }
-    if (focus == 3) return;
-    for (uint32_t i = 0; i < g_count && new_added < cfg->new_limit; i++) {
-        if (g_records[i].state == VOCAB_STATE_NEW) {
-            queue_push(i);
-            new_added++;
-        }
-    }
-}
-
-static bool queue_reinsert(uint32_t id) {
-    if (!g_queue || g_queue_len >= g_count) return false;
-    uint32_t at = g_queue_pos + 3;
-    if (at > g_queue_len) at = g_queue_len;
-    memmove(g_queue + at + 1, g_queue + at, (g_queue_len - at) * sizeof(uint32_t));
-    g_queue[at] = id;
-    g_queue_len++;
-    return true;
-}
-
 /* ------------------------------------------------------------------- API */
 
 bool vocab_open(const char *root, uint32_t now_min) {
@@ -878,11 +811,10 @@ bool vocab_open(const char *root, uint32_t now_min) {
     journal_replay();
     g_plan = vocab_alloc(PLAN_MAX, sizeof(plan_entry_t));
     time_load();
-    g_queue = vocab_alloc(g_count ? g_count : 1, sizeof(uint32_t));
     vocab_config_load(g_root, &g_config);
     g_open = true;
     g_current_valid = false;
-    return g_queue != NULL;
+    return true;
 }
 
 void vocab_close(uint32_t now_min) {
@@ -892,13 +824,10 @@ void vocab_close(uint32_t now_min) {
     }
     bank_close();
     free(g_records);
-    free(g_queue);
     free(g_plan);
     g_plan = NULL;
     g_records = NULL;
-    g_queue = NULL;
     g_count = 0;
-    g_queue_len = g_queue_pos = 0;
     g_undo_count = 0;
     g_open = false;
 }
@@ -907,18 +836,7 @@ bool vocab_opened(void) { return g_open; }
 uint32_t vocab_count(void) { return g_count; }
 
 bool vocab_begin_day(uint32_t now_min, const vocab_config_t *cfg) {
-    if (!g_open) return false;
-    if (cfg) g_config = *cfg;
-    g_now = now_min;
-    const uint32_t day = now_min / VOCAB_MINUTE_PER_DAY;
-    if (day != g_last_day) {
-        g_streak = (g_last_day && day == g_last_day + 1) ? (uint16_t)(g_streak + 1) : 1;
-        g_last_day = day;
-        g_new_today = 0;
-        g_reviews_today = 0;
-    }
-    queue_build(now_min, &g_config, 0);
-    return true;
+    return vocab_begin_session(now_min, cfg, 0);
 }
 
 bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus) {
@@ -934,7 +852,7 @@ bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus)
     }
     g_focus = focus;
     g_exhausted = false;
-    if (focus == 1 || focus == 2 || focus == 3) {
+    {
         bool usable = plan_load() && g_plan_hdr.focus == (uint8_t)focus &&
                       g_plan_hdr.pos < g_plan_hdr.len;
         if (!usable) {
@@ -950,8 +868,6 @@ bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus)
             g_plan_hdr.focus = (uint8_t)focus;
             plan_save();
         }
-    } else {
-        queue_build(now_min, &g_config, focus);
     }
     return true;
 }
@@ -987,57 +903,31 @@ static bool load_card(uint32_t id, vocab_card_t *out, vocab_card_stage_t *stage)
 }
 
 bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage) {
-    if (!g_open || !out) return false;
-    if ((g_focus == 1 || g_focus == 2 || g_focus == 3) && g_plan) {
-        for (;;) {
-            while (g_plan_hdr.pos < g_plan_hdr.len) {
-                plan_entry_t *entry = &g_plan[g_plan_hdr.pos];
-                if ((entry->flags & 1) || entry->id >= g_count) {
-                    g_plan_hdr.pos++;
-                    continue;
-                }
-                g_current = entry->id;
-                g_current_valid = true;
-                g_revealed = false;
-                if (!load_card(entry->id, out, stage)) {
-                    g_plan_hdr.pos++;
-                    continue;
-                }
-                g_stage = (vocab_card_stage_t)entry->stage;
-                if (stage) *stage = g_stage;
-                return true;
+    if (!g_open || !out || !g_plan) return false;
+    for (;;) {
+        while (g_plan_hdr.pos < g_plan_hdr.len) {
+            plan_entry_t *entry = &g_plan[g_plan_hdr.pos];
+            if ((entry->flags & 1) || entry->id >= g_count) {
+                g_plan_hdr.pos++;
+                continue;
             }
-            if (!plan_advance(g_now)) {
-                g_exhausted = true;
-                g_current_valid = false;
-                return false;
+            g_current = entry->id;
+            g_current_valid = true;
+            if (!load_card(entry->id, out, stage)) {
+                g_plan_hdr.pos++;
+                continue;
             }
-            plan_save();
+            g_stage = (vocab_card_stage_t)entry->stage;
+            if (stage) *stage = g_stage;
+            return true;
         }
+        if (!plan_advance(g_now)) {
+            g_exhausted = true;
+            g_current_valid = false;
+            return false;
+        }
+        plan_save();
     }
-    if (!g_queue) return false;
-    while (g_queue_pos < g_queue_len) {
-        uint32_t id = g_queue[g_queue_pos];
-        if (id >= g_count) {
-            g_queue_pos++;
-            continue;
-        }
-        vocab_state_record_t *record = &g_records[id];
-        if (record->state != VOCAB_STATE_NEW && record->due_min && record->due_min > g_now) {
-            g_queue_pos++;
-            continue;
-        }
-        g_current = id;
-        g_current_valid = true;
-        g_revealed = false;
-        if (!load_card(id, out, stage)) {
-            g_queue_pos++;
-            continue;
-        }
-        return true;
-    }
-    g_current_valid = false;
-    return false;
 }
 
 bool vocab_load_by_id(uint32_t id, vocab_card_t *out, vocab_card_stage_t *stage) {
@@ -1054,7 +944,6 @@ void vocab_abandon_plan(void) {
 
 bool vocab_current_card(vocab_card_t *out, vocab_card_stage_t *stage) {
     if (!g_open || !g_current_valid || !out) return false;
-    g_revealed = false;
     return load_card(g_current, out, stage);
 }
 
@@ -1069,19 +958,18 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
     vocab_undo_t *undo = &g_undo[g_undo_count % VOCAB_UNDO_DEPTH];
     undo->id = g_current;
     undo->record = *record;
-    undo->queue_pos = g_queue_pos;
+    undo->queue_pos = g_plan_hdr.pos;
     undo->new_today = g_new_today;
     undo->reviews_today = g_reviews_today;
     g_undo_count++;
 
     schedule_record(record, grade, now_min, &g_config);
     journal_append(g_current, record);
-    g_queue_pos++;
     if (was_new && g_new_today < 0xFFFF) g_new_today++;
     /* Only due-card answers count as reviews; learning steps are part of study. */
     if (was_review && g_reviews_today < 0xFFFF) g_reviews_today++;
 
-    if (g_focus == 1 || g_focus == 2 || g_focus == 3) {
+    {
         if (g_plan_hdr.pos < g_plan_hdr.len) {
             plan_entry_t *entry = &g_plan[g_plan_hdr.pos];
             entry->flags = (uint8_t)(1u | (grade == VOCAB_AGAIN ? 2u : 0u));
@@ -1105,12 +993,6 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
             }
             plan_save();
         }
-    } else if (record->state == VOCAB_STATE_LEARNING || record->state == VOCAB_STATE_RELEARNING) {
-        g_resume_id = g_current;
-        g_resume_day = now_min / VOCAB_MINUTE_PER_DAY;
-        queue_reinsert(g_current);
-    } else {
-        g_resume_id = 0xFFFFFFFFu;
     }
     g_current_valid = false;
     return true;
@@ -1122,12 +1004,10 @@ bool vocab_undo(uint32_t now_min) {
     vocab_undo_t *undo = &g_undo[g_undo_count % VOCAB_UNDO_DEPTH];
     if (undo->id >= g_count) return false;
     g_records[undo->id] = undo->record;
-    if ((g_focus == 1 || g_focus == 2 || g_focus == 3) && g_plan) {
+    if (g_plan) {
         g_plan_hdr.pos = (uint16_t)undo->queue_pos;
         if (g_plan_hdr.pos < g_plan_hdr.len) g_plan[g_plan_hdr.pos].flags = 0;
         plan_save();
-    } else {
-        g_queue_pos = undo->queue_pos;
     }
     g_new_today = undo->new_today;
     g_reviews_today = undo->reviews_today;
@@ -1237,7 +1117,6 @@ bool vocab_reset_progress(void) {
     g_last_day = 0;
     g_undo_count = 0;
     g_resume_id = 0xFFFFFFFFu;
-    g_queue_len = g_queue_pos = 0;
     plan_reset();
     char path[256];
     state_path(path, sizeof(path));
@@ -1337,9 +1216,6 @@ bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]) {
     }
     return found == 3;
 }
-vocab_card_stage_t vocab_current_stage(void) { return g_stage; }
-bool vocab_current_revealed(void) { return g_revealed; }
-void vocab_reveal(void) { g_revealed = true; }
 
 bool vocab_export_log(const char *path) {
     if (!path || !*path) return false;
