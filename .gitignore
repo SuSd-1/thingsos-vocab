@@ -1,3 +1,21 @@
 build/
 *.o
 *.bin.tmp
+*.bin
+*.elf
+*.map
+.DS_Store
+__pycache__/
+*.pyc
+*.log
+
+# personal data / generated media (keep the tiny samples)
+*.xlsx
+*.mp3
+*.wav
+*.onnx
+*.onnx.json
+!samples/audio/*.mp3
+
+# local tool state
+.venv/

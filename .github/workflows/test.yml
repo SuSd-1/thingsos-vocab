@@ -1,0 +1,21 @@
+name: host-tests
+
+on:
+  push:
+    branches: [main, vocab]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure host core
+        run: cmake -S native -B build/host -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build vocabulary tests
+        run: cmake --build build/host --target thingsos_vocab_test -j 4
+
+      - name: Run vocabulary tests
+        run: ./build/host/thingsos_vocab_test

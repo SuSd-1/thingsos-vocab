@@ -1,0 +1,1230 @@
+From c9982134d8be076b57c1432f72af830fb2cb25c4 Mon Sep 17 00:00:00 2001
+From: vocab-kit <local@localhost>
+Date: Wed, 18 Nov 2026 02:55:04 +0800
+Subject: [PATCH 7/8] snapshot: review groups, hard/again split, peek, bottom
+ bar and settings
+
+---
+ native/firmware/main/vocab_ui.inc | 373 ++++++++++++++++++++++++---
+ native/include/thingsos/vocab.h   |  17 ++
+ native/src/vocab.c                | 404 ++++++++++++++++++++++++++++--
+ native/tests/vocab_test.c         |  75 +++++-
+ 4 files changed, 811 insertions(+), 58 deletions(-)
+
+diff --git a/native/firmware/main/vocab_ui.inc b/native/firmware/main/vocab_ui.inc
+index 70384f3..fe0cc67 100644
+--- a/native/firmware/main/vocab_ui.inc
++++ b/native/firmware/main/vocab_ui.inc
+@@ -8,6 +8,7 @@
+  * back through the learning ladder.
+  */
+ #include "thingsos/vocab.h"
++#include "esp_timer.h"
+ 
+ #define VOCAB_UX_MINUTES_2020 26297280u
+ #define VOCAB_OPTION_ROWS 4
+@@ -17,6 +18,8 @@ typedef enum {
+     VOCAB_SCREEN_LEARN,
+     VOCAB_SCREEN_REVIEW,
+     VOCAB_SCREEN_DONE,
++    VOCAB_SCREEN_SETTINGS,
++    VOCAB_SCREEN_STATS,
+ } vocab_screen_t;
+ 
+ typedef enum {
+@@ -25,6 +28,13 @@ typedef enum {
+ } vocab_phase_t;
+ 
+ static uint8_t vu_chain_example;
++static uint64_t vu_time_last_us;
++static uint32_t vu_time_pending_ms;
++static bool vu_confirm_clear;
++static uint32_t vu_history[8];
++static uint8_t vu_hist_count, vu_hist_pos;
++static bool vu_peeking;
++static uint32_t vu_peek_return;
+ 
+ static struct {
+     bool started, failed;
+@@ -102,15 +112,11 @@ static void vocab_undo_icon(void) {
+         {-11, 0}, {-10, -6}, {-6, -10}, {0, -11}, {6, -10}, {10, -6},
+     };
+     const int cx = 620, cy = 148;
+-    /* Arc from 90 degrees round to 0, leaving the top-right quadrant open. */
+-    for (int i = 3; i <= 12; i++) {
+-        const int a = i % 12;
+-        toolbar_stroke(cx + ring[i - 1][0], cy + ring[i - 1][1],
+-                       cx + ring[a][0], cy + ring[a][1]);
+-    }
+-    /* Arrowhead at the open end, pointing up along the tangent. */
+-    toolbar_stroke(cx + 11, cy - 5, cx + 5, cy - 3);
+-    toolbar_stroke(cx + 11, cy - 5, cx + 12, cy + 2);
++    for (int i = 0; i < 12; i++)
++        toolbar_stroke(cx + ring[i][0], cy + ring[i][1],
++                       cx + ring[(i + 1) % 12][0], cy + ring[(i + 1) % 12][1]);
++    /* A real glyph keeps the arrow perfectly centred inside the ring. */
++    label("←", cx - 11, cy + 9, 26, 30);
+ }
+ 
+ 
+@@ -254,6 +260,30 @@ static void vocab_play_file(const char* path) {
+ }
+ 
+ /* Word first, then the example sentence when that screen shows it. */
++static void vocab_time_flush(void) {
++    if (vu_time_pending_ms < 1000) return;
++    const uint32_t secs = vu_time_pending_ms / 1000;
++    vu_time_pending_ms -= secs * 1000;
++    vocab_add_seconds(secs);
++}
++
++static bool vocab_studying(void) {
++    return app.page == THINGSOS_UI_VOCAB && !app.asleep &&
++           (vu.screen == VOCAB_SCREEN_LEARN || vu.screen == VOCAB_SCREEN_REVIEW);
++}
++
++static void vocab_time_tick(void) {
++    if (!vocab_studying()) {
++        vu_time_last_us = 0;
++        vocab_time_flush();
++        return;
++    }
++    const uint64_t now = (uint64_t)esp_timer_get_time();
++    if (vu_time_last_us && now > vu_time_last_us) vu_time_pending_ms += (uint32_t)((now - vu_time_last_us) / 1000);
++    vu_time_last_us = now;
++    if (vu_time_pending_ms >= 30000) vocab_time_flush();
++}
++
+ static void vocab_play_word(void) {
+     char audio[256];
+     if (vocab_audio_path(vu.card.id, audio, sizeof(audio))) vocab_play_file(audio);
+@@ -261,11 +291,15 @@ static void vocab_play_word(void) {
+ 
+ /* Every screen speaks the word itself. The example sentence is only played
+    when the learner taps the example line. */
+-static void vocab_play_stage_audio(void) { vocab_play_word(); }
++static void vocab_play_stage_audio(void) {
++    if (!vu.config.auto_audio) return;
++    vocab_play_word();
++}
+ 
+ /* The audio service is single-channel: when the word finishes we start the
+    example sentence so the answer page reads "word, then sentence". */
+ static void vocab_audio_tick(void) {
++    vocab_time_tick();
+     if (!vu_chain_example || app.page != THINGSOS_UI_VOCAB) return;
+     thingsos_audio_status_t status;
+     thingsos_audio_status(&status);
+@@ -277,6 +311,7 @@ static void vocab_audio_tick(void) {
+ }
+ 
+ static bool vocab_load_next(void) {
++    vu_peeking = false;
+     vu_chain_example = 0;
+     vu.revealed = false;
+     vu.answered = false;
+@@ -309,6 +344,7 @@ static bool vocab_start(void) {
+ }
+ 
+ static void vocab_stop(void) {
++    vocab_time_flush();
+     vu_chain_example = 0;
+     if (!vu.started) return;
+     thingsos_audio_stop();
+@@ -366,6 +402,11 @@ static void vocab_submit(vocab_grade_t grade) {
+     uint32_t now = vocab_now_min();
+     const uint32_t learned_before = vocab_learned_count();
+     if (!vocab_answer(now, grade)) return;
++    if (vu_hist_count == 0 || vu_history[(vu_hist_pos + 7) % 8] != vu.card.id) {
++        vu_history[vu_hist_pos] = vu.card.id;
++        vu_hist_pos = (uint8_t)((vu_hist_pos + 1) % 8);
++        if (vu_hist_count < 8) vu_hist_count++;
++    }
+     const bool graduated = vocab_learned_count() > learned_before;
+     vocab_stats(now, &vu.stats);
+ 
+@@ -389,12 +430,27 @@ static void vocab_submit(vocab_grade_t grade) {
+     vocab_play_stage_audio();
+     {
+         char example[256];
+-        vu_chain_example = vocab_example_audio_path(vu.card.id, example, sizeof(example)) ? 1 : 0;
++        vu_chain_example = (vu.config.auto_example &&
++                            vocab_example_audio_path(vu.card.id, example, sizeof(example))) ? 1 : 0;
+     }
+     app.dirty = true;
+ }
+ 
+ /* One part of speech per line, exactly as the book splits the gloss. */
++/* Where we are in the current group: round and card inside the round. */
++static void vocab_draw_round_progress(void) {
++    uint16_t group;
++    uint8_t round, index, total, phase;
++    if (!vocab_plan_progress(&group, &round, &index, &total, &phase)) return;
++    char line[64];
++    if (phase)
++        snprintf(line, sizeof(line), "重学 %u/%u", (unsigned)index, (unsigned)total);
++    else
++        snprintf(line, sizeof(line), "第 %u 轮 · %u/%u", (unsigned)round, (unsigned)index,
++                 (unsigned)total);
++    label(line, 36, 1070, 22, 400);
++}
++
+ static void vocab_draw_meaning(const char* text, int y) {
+     char buf[VOCAB_MEANING_BYTES];
+     snprintf(buf, sizeof(buf), "%s", text);
+@@ -408,6 +464,7 @@ static void vocab_draw_meaning(const char* text, int y) {
+ }
+ 
+ static void vocab_draw_answer(void) {
++    vocab_draw_round_progress();
+     vocab_header(vu.screen == VOCAB_SCREEN_REVIEW ? "复习" : "学习");
+     label(vu.card.word, 36, 258, 64, 612);
+     if (vu.card.phonetic[0]) { char ipa[96]; label(vocab_phonetic_text(ipa, sizeof(ipa), vu.card.phonetic), 36, 308, 26, 612); }
+@@ -441,38 +498,133 @@ static void vocab_draw_answer(void) {
+     vocab_button(358, 1102, 290, 90, "记 错 了");
+ }
+ 
++static void vocab_gear_icon(void) {
++    static const signed char ring[12][2] = {
++        {10, 0}, {9, 5}, {5, 9}, {0, 10}, {-5, 9}, {-9, 5},
++        {-10, 0}, {-9, -5}, {-5, -9}, {0, -10}, {5, -9}, {9, -5},
++    };
++    static const signed char dir[8][2] = {
++        {1, 0}, {1, 1}, {0, 1}, {-1, 1}, {-1, 0}, {-1, -1}, {0, -1}, {1, -1},
++    };
++    const int cx = 620, cy = 146;
++    for (int i = 0; i < 12; i++)
++        toolbar_stroke(cx + ring[i][0], cy + ring[i][1],
++                       cx + ring[(i + 1) % 12][0], cy + ring[(i + 1) % 12][1]);
++    for (int i = 0; i < 8; i++)
++        toolbar_stroke(cx + dir[i][0] * 12, cy + dir[i][1] * 12,
++                       cx + dir[i][0] * 15, cy + dir[i][1] * 15);
++    thingsos_rect(&app.canvas, cx - 3, cy - 3, 6, 6, 0);
++}
++
+ static void vocab_draw_home(void) {
+     vocab_header("背单词");
+-    char line[128];
+-    snprintf(line, sizeof(line), "连续 %u 天 · 今日新词 %u · 今日复习 %u",
+-             (unsigned)vu.stats.streak, (unsigned)vu.stats.new_today,
+-             (unsigned)vu.stats.reviews_today);
+-    label(line, 36, 196, 24, 612);
+-    const uint32_t total = vocab_count();
+-    const uint32_t learned = vocab_learned_count();
+-    thingsos_rect(&app.canvas, 36, 236, 612, 1, 0);
+-
+-    label("学习进度", 36, 296, 28, 300);
+-    snprintf(line, sizeof(line), "%u / %u", (unsigned)learned, (unsigned)total);
+-    thingsos_font_size(&app.font, 26);
+-    thingsos_label_right(&app.font, &app.canvas, line, 36, 296, 612);
+-    vocab_bar(318, learned, total);
+-    snprintf(line, sizeof(line), "待学 %u · 已完成 %u%%", (unsigned)vocab_new_count(),
+-             total ? (unsigned)((uint64_t)learned * 100 / total) : 0u);
+-    label(line, 36, 366, 22, 612);
+-
+-    label("复习进度", 36, 446, 28, 300);
++    vocab_gear_icon();
++    const unsigned learn_left = vu.stats.new_today < vu.config.new_limit
++                                    ? vu.config.new_limit - vu.stats.new_today : 0;
+     unsigned review_done = vu.stats.reviews_today;
+     if (review_done > vu.stats.due_today) review_done = vu.stats.due_today;
+-    snprintf(line, sizeof(line), "%u / %u", review_done, (unsigned)vu.stats.due_today);
+-    thingsos_font_size(&app.font, 26);
+-    thingsos_label_right(&app.font, &app.canvas, line, 36, 446, 612);
+-    vocab_bar(468, review_done, vu.stats.due_today);
+-    label("到期词会用「认识 / 模糊 / 忘记」复习", 36, 516, 22, 612);
++    const unsigned review_left = vu.stats.due_today > review_done
++                                     ? vu.stats.due_today - review_done : 0;
++    char line[64];
++    app_outline(36, 300, 300, 190);
++    app_outline(348, 300, 300, 190);
++    label("学习", 64, 368, 40, 240);
++    if (!learn_left && vu.stats.new_today) label("已完成", 64, 452, 36, 240);
++    else { snprintf(line, sizeof(line), "%u", learn_left); label(line, 64, 456, 64, 240); }
++    label("复习", 376, 368, 40, 240);
++    if (!review_left && vu.stats.due_today) label("已完成", 376, 452, 36, 240);
++    else { snprintf(line, sizeof(line), "%u", review_left); label(line, 376, 456, 64, 240); }
++    snprintf(line, sizeof(line), "连续 %u 天 · 已学 %u / %u", (unsigned)vu.stats.streak,
++             (unsigned)vocab_learned_count(), (unsigned)vocab_count());
++    label(line, 36, 570, 24, 612);
++    label("每日新词与复习上限在右上角「设置」里调整", 36, 620, 22, 612);
++}
++
++static const char* const vocab_setting_names[11] = {
++    "每日新词目标", "每日复习上限", "每组词数", "目标保持率", "学习算法",
++    "乱序学习", "自动发音", "朗读例句", "答错处理", "清空学习进度", "恢复默认设置",
++};
++
++static void vocab_format_span(uint32_t seconds, char* out, size_t bytes) {
++    const uint32_t hours = seconds / 3600u;
++    const uint32_t minutes = (seconds % 3600u) / 60u;
++    if (hours) snprintf(out, bytes, "%u 小时 %u 分", (unsigned)hours, (unsigned)minutes);
++    else if (minutes) snprintf(out, bytes, "%u 分 %u 秒", (unsigned)minutes, (unsigned)(seconds % 60u));
++    else snprintf(out, bytes, "%u 秒", (unsigned)seconds);
++}
+ 
+-    vocab_button(36, 640, 612, 120, "开 始 学 习");
+-    vocab_button(36, 800, 612, 120, "开 始 复 习");
+-    label("学习：选释义 → 看例句回忆 → 只看单词回忆", 36, 980, 20, 612);
++static void vocab_draw_bottom_bar(int active) {
++    const char* labels[3] = {"首页", "我的", "设置"};
++    thingsos_rect(&app.canvas, 0, 1106, 684, 1, 120);
++    for (int i = 0; i < 3; i++) {
++        const int cx = i * 228 + 114;
++        if (i == active) thingsos_rect(&app.canvas, cx - 26, 1186, 52, 3, 0);
++        centered_label(labels[i], i * 228, 1170, 26, 228);
++    }
++}
++
++static void vocab_draw_stats(void) {
++    vocab_header("我的学习");
++    char line[96], span[48];
++    uint32_t now = vocab_now_min();
++    vocab_stats(now, &vu.stats);
++    snprintf(line, sizeof(line), "今日学习 %u 词 · 今日复习 %u 词",
++             (unsigned)vu.stats.new_today, (unsigned)vu.stats.reviews_today);
++    label(line, 36, 280, 28, 612);
++    snprintf(line, sizeof(line), "累计已学 %u / %u", (unsigned)vu.stats.learned,
++             (unsigned)vu.stats.total);
++    label(line, 36, 356, 28, 612);
++    vocab_format_span(vu.stats.today_seconds, span, sizeof(span));
++    snprintf(line, sizeof(line), "今日用时 %s", span);
++    label(line, 36, 432, 26, 612);
++    vocab_format_span(vu.stats.total_seconds, span, sizeof(span));
++    snprintf(line, sizeof(line), "累计用时 %s", span);
++    label(line, 36, 500, 26, 612);
++    snprintf(line, sizeof(line), "连续学习 %u 天", (unsigned)vu.stats.streak);
++    label(line, 36, 568, 26, 612);
++}
++
++static void vocab_draw_settings(void) {
++    vocab_header("设置");
++    char value[32];
++    for (int i = 0; i < 11; i++) {
++        const int y = 236 + i * 70;
++        label(vocab_setting_names[i], 36, y, 26, 360);
++        value[0] = 0;
++        switch (i) {
++            case 0: snprintf(value, sizeof(value), "%u", (unsigned)vu.config.new_limit); break;
++            case 1: snprintf(value, sizeof(value), "%u", (unsigned)vu.config.review_limit); break;
++            case 2: snprintf(value, sizeof(value), "%u", (unsigned)vu.config.group_size); break;
++            case 3: snprintf(value, sizeof(value), "%u%%", (unsigned)vu.config.target_percent); break;
++            case 4: snprintf(value, sizeof(value), "%s",
++                             vu.config.mode == VOCAB_MODE_CLASSIC ? "经典" : "FSRS"); break;
++            case 5: snprintf(value, sizeof(value), "%s", vu.config.shuffle ? "开" : "关"); break;
++            case 6: snprintf(value, sizeof(value), "%s", vu.config.auto_audio ? "开" : "关"); break;
++            case 7: snprintf(value, sizeof(value), "%s", vu.config.auto_example ? "开" : "关"); break;
++            case 8: snprintf(value, sizeof(value), "%s", vu.config.error_mode ? "本轮" : "组末"); break;
++            default: break;
++        }
++        if (i < 9) {
++            thingsos_font_size(&app.font, 26);
++            thingsos_label_right(&app.font, &app.canvas, value, 36, y, 500);
++        } else {
++            vocab_button(470, y - 34, 178, 48, i == 9 ? "清 空" : "恢 复");
++        }
++        if (i < 4) {
++            vocab_button(548, y - 34, 44, 48, "－");
++            vocab_button(600, y - 34, 44, 48, "＋");
++        }
++        thingsos_rect(&app.canvas, 36, y + 18, 612, 1, 210);
++    }
++    if (vu_confirm_clear) {
++        thingsos_rect(&app.canvas, 90, 470, 504, 252, 255);
++        thingsos_rect(&app.canvas, 90, 470, 504, 2, 0);
++        thingsos_rect(&app.canvas, 90, 720, 504, 2, 0);
++        centered_label("确定清空全部学习进度？", 90, 542, 30, 504);
++        centered_label("词库与发音不会被删除", 90, 592, 22, 504);
++        vocab_button(120, 632, 180, 70, "取消");
++        vocab_button(384, 632, 180, 70, "确定");
++    }
+ }
+ 
+ static void vocab_draw_quiz(void) {
+@@ -493,6 +645,7 @@ static void vocab_draw_quiz(void) {
+ }
+ 
+ static void vocab_draw_recall(void) {
++    vocab_draw_round_progress();
+     vocab_header(vu.screen == VOCAB_SCREEN_REVIEW ? "复习" : "学习");
+     label(vu.card.word, 36, 258, 64, 612);
+     if (vu.card.phonetic[0]) {
+@@ -544,8 +697,13 @@ static bool vocab_draw(void) {
+     }
+ 
+     vocab_back_row();
++    if (vu.screen == VOCAB_SCREEN_HOME) vocab_draw_bottom_bar(0);
++    else if (vu.screen == VOCAB_SCREEN_STATS) vocab_draw_bottom_bar(1);
++    else if (vu.screen == VOCAB_SCREEN_SETTINGS) vocab_draw_bottom_bar(2);
+     switch (vu.screen) {
+         case VOCAB_SCREEN_HOME: vocab_draw_home(); break;
++        case VOCAB_SCREEN_SETTINGS: vocab_draw_settings(); break;
++        case VOCAB_SCREEN_STATS: vocab_draw_stats(); break;
+         case VOCAB_SCREEN_DONE: vocab_draw_done(); break;
+         default:
+             if (vu.phase == VOCAB_PHASE_ANSWER) vocab_draw_answer();
+@@ -563,6 +721,10 @@ static bool vocab_tap(int x, int y) {
+     if (x < 92 && y >= 74 && y < 205) {
+         if (vu.screen == VOCAB_SCREEN_HOME) {
+             vocab_leave();
++        } else if (vu.screen == VOCAB_SCREEN_SETTINGS) {
++            vu.screen = VOCAB_SCREEN_HOME;
++            vu_confirm_clear = false;
++            app.dirty = true;
+         } else {
+             vocab_stop();
+             vu.screen = VOCAB_SCREEN_HOME;
+@@ -575,9 +737,103 @@ static bool vocab_tap(int x, int y) {
+     /* No bottom-edge exit: the panel's last rows receive stray taps and an
+        implicit leave looked like a crash. Leaving is MENU / HOME / "<" only. */
+ 
++    if (vu.screen == VOCAB_SCREEN_HOME || vu.screen == VOCAB_SCREEN_STATS ||
++        vu.screen == VOCAB_SCREEN_SETTINGS) {
++        if (vu.screen == VOCAB_SCREEN_SETTINGS && vu_confirm_clear) {
++            /* handled below */
++        } else if (y >= 1110) {
++            vu_confirm_clear = false;
++            vu.screen = x < 228 ? VOCAB_SCREEN_HOME
++                        : x < 456 ? VOCAB_SCREEN_STATS
++                                  : VOCAB_SCREEN_SETTINGS;
++            app.dirty = true;
++            return true;
++        }
++    }
+     if (vu.screen == VOCAB_SCREEN_HOME) {
+-        if (y >= 640 && y < 760) { vocab_start_learn(); return true; }
+-        if (y >= 800 && y < 920) { vocab_start_review(); return true; }
++        if (x >= 580 && y < 205) { vu.screen = VOCAB_SCREEN_SETTINGS; app.dirty = true; return true; }
++        if (y >= 300 && y < 490) {
++            if (x < 348) vocab_start_learn();
++            else vocab_start_review();
++            return true;
++        }
++        return true;
++    }
++    if (vu.screen == VOCAB_SCREEN_SETTINGS) {
++        if (vu_confirm_clear) {
++            if (y >= 620 && y < 712) {
++                if (x >= 120 && x < 300) {
++                    vu_confirm_clear = false;
++                    app.dirty = true;
++                } else if (x >= 384 && x < 564) {
++                    vu_confirm_clear = false;
++                    vocab_reset_progress();
++                    vu.started = true;
++                    uint32_t now = vocab_now_min();
++                    vocab_stats(now, &vu.stats);
++                    app.dirty = true;
++                }
++            }
++            return true;
++        }
++        const int row = (y - 200) / 70;
++        if (row >= 0 && row < 11 && x >= 380) {
++            bool plus = x >= 600;
++            bool save = true;
++            switch (row) {
++                case 0:
++                    if (x >= 548) {
++                        int v = (int)vu.config.new_limit + (plus ? 5 : -5);
++                        if (v < 5) v = 5;
++                        if (v > 200) v = 200;
++                        vu.config.new_limit = (uint16_t)v;
++                    } else save = false;
++                    break;
++                case 1:
++                    if (x >= 548) {
++                        int v = (int)vu.config.review_limit + (plus ? 50 : -50);
++                        if (v < 50) v = 50;
++                        if (v > 2000) v = 2000;
++                        vu.config.review_limit = (uint16_t)v;
++                    } else save = false;
++                    break;
++                case 2:
++                    if (x >= 548) {
++                        int v = (int)vu.config.group_size + (plus ? 5 : -5);
++                        if (v < 5) v = 5;
++                        if (v > 20) v = 20;
++                        vu.config.group_size = (uint8_t)v;
++                    } else save = false;
++                    break;
++                case 3:
++                    if (x >= 548) {
++                        int v = (int)vu.config.target_percent + (plus ? 5 : -5);
++                        if (v < 80) v = 80;
++                        if (v > 95) v = 95;
++                        vu.config.target_percent = (uint8_t)v;
++                    } else save = false;
++                    break;
++                case 4:
++                    vu.config.mode = vu.config.mode == VOCAB_MODE_CLASSIC ? VOCAB_MODE_FSRS
++                                                                         : VOCAB_MODE_CLASSIC;
++                    break;
++                case 5:
++                    vu.config.shuffle = !vu.config.shuffle;
++                    vocab_abandon_plan();
++                    break;
++                case 6: vu.config.auto_audio = !vu.config.auto_audio; break;
++                case 7: vu.config.auto_example = !vu.config.auto_example; break;
++                case 8: vu.config.error_mode = vu.config.error_mode ? 0 : 1; break;
++                case 9: vu_confirm_clear = true; save = false; break;
++                case 10: vocab_config_defaults(&vu.config); break;
++            }
++            if (save) vocab_config_save("/sdcard", &vu.config);
++            app.dirty = true;
++            return true;
++        }
++        return true;
++    }
++    if (vu.screen == VOCAB_SCREEN_STATS) {
+         return true;
+     }
+     if (vu.screen == VOCAB_SCREEN_DONE) {
+@@ -593,9 +849,29 @@ static bool vocab_tap(int x, int y) {
+ 
+     if (vu.phase == VOCAB_PHASE_ANSWER) {
+         if (x >= 580 && y >= 74 && y < 205) {
+-            vocab_do_undo();
++            if (vu_peeking) {
++                if (vocab_load_by_id(vu_peek_return, &vu.card, &vu.stage)) {
++                    vu.phase = VOCAB_PHASE_ANSWER;
++                    vu_peeking = false;
++                    app.dirty = true;
++                }
++                return true;
++            }
++            for (uint8_t k = 1; k < vu_hist_count; k++) {
++                const uint32_t id = vu_history[(vu_hist_pos + 8 - 1 - k) % 8];
++                if (id == vu.card.id) continue;
++                const uint32_t original = vu.card.id;
++                if (vocab_load_by_id(id, &vu.card, &vu.stage)) {
++                    vu_peek_return = original;
++                    vu_peeking = true;
++                    vu.phase = VOCAB_PHASE_ANSWER;
++                    app.dirty = true;
++                }
++                break;
++            }
+             return true;
+         }
++        if (vu_peeking) return true;
+         if (y >= 600 && y < 780 && vu.card.example_en[0]) {
+             char example[256];
+             if (vocab_example_audio_path(vu.card.id, example, sizeof(example)))
+@@ -661,6 +937,21 @@ static bool vocab_key(int action) {
+         else if (action == THINGSOS_KEY_PREVIOUS) vocab_start_review();
+         return true;
+     }
++    if (vu.screen == VOCAB_SCREEN_STATS || vu.screen == VOCAB_SCREEN_SETTINGS) {
++        if (action == THINGSOS_KEY_NEXT || action == THINGSOS_KEY_PREVIOUS) {
++            vu.screen = VOCAB_SCREEN_HOME;
++            vu_confirm_clear = false;
++            app.dirty = true;
++        }
++        return true;
++    }
++    if (vu.screen == VOCAB_SCREEN_STATS) {
++        if (action == THINGSOS_KEY_NEXT || action == THINGSOS_KEY_PREVIOUS) {
++            vu.screen = VOCAB_SCREEN_HOME;
++            app.dirty = true;
++        }
++        return true;
++    }
+     if (vu.screen == VOCAB_SCREEN_DONE) {
+         if (action == THINGSOS_KEY_NEXT || action == THINGSOS_KEY_PREVIOUS) {
+             vu.screen = VOCAB_SCREEN_HOME;
+diff --git a/native/include/thingsos/vocab.h b/native/include/thingsos/vocab.h
+index a45b674..01ddb67 100644
+--- a/native/include/thingsos/vocab.h
++++ b/native/include/thingsos/vocab.h
+@@ -72,6 +72,8 @@ typedef struct {
+     uint16_t streak;
+     uint32_t total;
+     uint32_t learned;
++    uint32_t today_seconds;
++    uint32_t total_seconds;
+     bool finished;
+ } vocab_stats_t;
+ 
+@@ -81,6 +83,10 @@ typedef struct {
+     uint16_t new_limit;
+     uint16_t review_limit;
+     bool auto_audio;
++    uint8_t group_size;   /* cards per group, 5..20 */
++    uint8_t error_mode;   /* 0 = relearn after the group, 1 = retry at round end */
++    bool shuffle;         /* pick each group in random order */
++    bool auto_example;    /* read the example sentence after the word */
+ } vocab_config_t;
+ 
+ /* 24 bytes, persisted as-is. */
+@@ -114,11 +120,18 @@ bool vocab_stats(uint32_t now_min, vocab_stats_t *out);
+ bool vocab_audio_path(uint32_t id, char *buf, size_t bytes);
+ bool vocab_example_audio_path(uint32_t id, char *buf, size_t bytes);
+ uint32_t vocab_current_id(void);
++/* Load one card by id without touching the queue (peek at a previous word). */
++bool vocab_load_by_id(uint32_t id, vocab_card_t *out, vocab_card_stage_t *stage);
++/* Drop the saved learning plan so the next session rebuilds it. */
++void vocab_abandon_plan(void);
+ /* Re-read the current card without advancing the queue (used after undo). */
+ bool vocab_current_card(vocab_card_t *out, vocab_card_stage_t *stage);
+ uint32_t vocab_learned_count(void);
+ uint32_t vocab_new_count(void);
+ uint8_t vocab_current_level(void);
++/* Group/round cursor of the active learning plan (false when none). */
++bool vocab_plan_progress(uint16_t *group, uint8_t *round, uint8_t *index, uint8_t *total,
++                         uint8_t *phase);
+ /* Three meaning strings that are plausibly confusable with `id`. */
+ bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]);
+ vocab_card_stage_t vocab_current_stage(void);
+@@ -129,6 +142,10 @@ void vocab_reveal(void);
+ void vocab_config_defaults(vocab_config_t *cfg);
+ bool vocab_config_load(const char *root, vocab_config_t *cfg);
+ bool vocab_config_save(const char *root, const vocab_config_t *cfg);
++/* Study-time accounting (seconds). */
++bool vocab_add_seconds(uint32_t seconds);
++/* Wipe learning progress (state, journal and plan) but keep the bank/audio. */
++bool vocab_reset_progress(void);
+ 
+ /* Log export for offline weight optimisation (best effort). */
+ bool vocab_export_log(const char *path);
+diff --git a/native/src/vocab.c b/native/src/vocab.c
+index 0eb08cc..9b09574 100644
+--- a/native/src/vocab.c
++++ b/native/src/vocab.c
+@@ -38,7 +38,7 @@ static void *vocab_alloc(size_t count, size_t size) { return calloc(count, size)
+ #define VOCAB_BANK_VERSION 4u
+ #define VOCAB_INDEX_ENTRY 40u
+ #define VOCAB_JOURNAL_ENTRY 32u
+-#define VOCAB_CONFIG_BYTES 16u
++#define VOCAB_CONFIG_BYTES 20u
+ #define VOCAB_UNDO_DEPTH 16u
+ #define VOCAB_STATE_HEADER 32u
+ #define VOCAB_STATE_VERSION 2u
+@@ -90,6 +90,8 @@ static bool g_open;
+ static uint32_t *g_queue;
+ static uint32_t g_queue_len;
+ static uint32_t g_queue_pos;
++static int g_focus;
++static bool g_exhausted;
+ static uint32_t g_current;
+ static bool g_current_valid;
+ static bool g_revealed;
+@@ -181,9 +183,13 @@ void vocab_config_defaults(vocab_config_t *cfg) {
+     if (!cfg) return;
+     cfg->mode = VOCAB_MODE_FSRS;
+     cfg->target_percent = 90;
+-    cfg->new_limit = 20;
++    cfg->new_limit = 60;
+     cfg->review_limit = 200;
+     cfg->auto_audio = true;
++    cfg->group_size = 10;
++    cfg->error_mode = 0;
++    cfg->shuffle = false;
++    cfg->auto_example = true;
+ }
+ 
+ bool vocab_config_load(const char *root, vocab_config_t *cfg) {
+@@ -197,8 +203,8 @@ bool vocab_config_load(const char *root, vocab_config_t *cfg) {
+     fclose(f);
+     if (got != sizeof(raw) || memcmp(raw, VOCAB_CONFIG_MAGIC, 4) != 0) return false;
+     uint32_t crc = 0;
+-    memcpy(&crc, raw + 12, 4);
+-    if (crc != crc32_bytes(raw, 12)) return false;
++    memcpy(&crc, raw + 16, 4);
++    if (crc != crc32_bytes(raw, 16)) return false;
+     cfg->mode = (vocab_mode_t)raw[4];
+     cfg->target_percent = raw[5];
+     uint16_t value = 0;
+@@ -207,9 +213,15 @@ bool vocab_config_load(const char *root, vocab_config_t *cfg) {
+     memcpy(&value, raw + 8, 2);
+     cfg->review_limit = value;
+     cfg->auto_audio = raw[10] != 0;
++    cfg->group_size = raw[11];
++    cfg->error_mode = raw[12];
++    cfg->shuffle = raw[13] != 0;
++    cfg->auto_example = raw[14] != 0;
+     if (cfg->mode != VOCAB_MODE_CLASSIC) cfg->mode = VOCAB_MODE_FSRS;
++    if (cfg->group_size < 5 || cfg->group_size > 20) cfg->group_size = 10;
++    if (cfg->error_mode > 1) cfg->error_mode = 0;
+     if (cfg->target_percent < 80 || cfg->target_percent > 95) cfg->target_percent = 90;
+-    if (cfg->new_limit == 0 || cfg->new_limit > 200) cfg->new_limit = 20;
++    if (cfg->new_limit == 0 || cfg->new_limit > 200) cfg->new_limit = 60;
+     if (cfg->review_limit < 20 || cfg->review_limit > 2000) cfg->review_limit = 200;
+     return true;
+ }
+@@ -224,8 +236,12 @@ bool vocab_config_save(const char *root, const vocab_config_t *cfg) {
+     memcpy(raw + 6, &cfg->new_limit, 2);
+     memcpy(raw + 8, &cfg->review_limit, 2);
+     raw[10] = cfg->auto_audio ? 1 : 0;
+-    uint32_t crc = crc32_bytes(raw, 12);
+-    memcpy(raw + 12, &crc, 4);
++    raw[11] = cfg->group_size;
++    raw[12] = cfg->error_mode;
++    raw[13] = cfg->shuffle ? 1 : 0;
++    raw[14] = cfg->auto_example ? 1 : 0;
++    uint32_t crc = crc32_bytes(raw, 16);
++    memcpy(raw + 16, &crc, 4);
+     FILE *f = fopen(path, "wb");
+     if (!f) return false;
+     bool ok = fwrite(raw, 1, sizeof(raw), f) == sizeof(raw);
+@@ -584,13 +600,15 @@ static bool schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
+         record->stability = memory.stability;
+         record->difficulty = memory.difficulty;
+         record->due_min = now_min + days * VOCAB_MINUTE_PER_DAY;
+-        if (grade == VOCAB_AGAIN || grade == VOCAB_HARD) {
+-            /* 模糊/不认识: strengthen with the 3-stage ladder right away. */
++        if (grade == VOCAB_AGAIN) {
++            /* 忘记: back to the three-stage ladder right away. */
+             record->state = VOCAB_STATE_RELEARNING;
+             record->flags = 0;
+-            record->lapses += grade == VOCAB_AGAIN ? 1 : 0;
++            record->lapses++;
+             record->due_min = now_min + 1;
+         } else {
++            /* 认识 and 模糊 both stay in review; 模糊 just earned a shorter
++               interval from the FSRS Hard grade. */
+             record->state = VOCAB_STATE_REVIEW;
+             record->flags = 0;
+         }
+@@ -603,6 +621,178 @@ static bool schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
+ 
+ /* ------------------------------------------------------------------ queue */
+ 
++/* ------------------------------------------------------- learning groups ---
++ * Learning follows the reference app: ten cards form a group, the group is
++ * drilled three times (quiz, example recall, bare word), and cards that failed
++ * any round are collected into a relearn group that runs right after the
++ * current group. The plan lives in plan.dat so a power cut resumes on the same
++ * card instead of restarting the group. */
++#define PLAN_MAX 96
++#define PLAN_MAGIC 0x504C414Eu /* "PLAN" */
++#define PLAN_VERSION 1u
++#define PLAN_GROUP_SIZE 10u
++
++typedef struct {
++    uint32_t id;
++    uint8_t stage;
++    uint8_t flags; /* bit0 answered, bit1 failed */
++    uint16_t pad;
++} plan_entry_t;
++
++typedef struct {
++    uint32_t magic;
++    uint16_t version;
++    uint8_t focus;
++    uint8_t phase; /* 0 = learn rounds, 1 = relearn rounds */
++    uint16_t len;
++    uint16_t pos;
++    uint16_t group;
++    uint16_t pad;
++} plan_header_t;
++
++static uint32_t g_today_seconds;
++static uint32_t g_total_seconds;
++static uint32_t g_time_day;
++static void time_load(void);
++static bool time_save(void);
++
++static plan_header_t g_plan_hdr;
++static plan_entry_t *g_plan;
++
++static void plan_path_of(char *buf, size_t bytes) { path_of(buf, bytes, "plan.dat"); }
++
++static void plan_reset(void) {
++    memset(&g_plan_hdr, 0, sizeof(g_plan_hdr));
++    g_plan_hdr.magic = PLAN_MAGIC;
++    g_plan_hdr.version = PLAN_VERSION;
++    if (g_plan) memset(g_plan, 0, sizeof(plan_entry_t) * PLAN_MAX);
++}
++
++static bool plan_save(void) {
++    if (!g_plan) return false;
++    char path[256], tmp[288];
++    plan_path_of(path, sizeof(path));
++    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
++    FILE *f = fopen(tmp, "wb");
++    if (!f) return false;
++    bool ok = fwrite(&g_plan_hdr, 1, sizeof(g_plan_hdr), f) == sizeof(g_plan_hdr) &&
++              (g_plan_hdr.len == 0 ||
++               fwrite(g_plan, sizeof(plan_entry_t), g_plan_hdr.len, f) == g_plan_hdr.len);
++    fflush(f);
++    fclose(f);
++    if (!ok) {
++        remove(tmp);
++        return false;
++    }
++    remove(path);
++    return rename(tmp, path) == 0;
++}
++
++static bool plan_load(void) {
++    if (!g_plan) return false;
++    char path[256];
++    plan_path_of(path, sizeof(path));
++    FILE *f = fopen(path, "rb");
++    if (!f) return false;
++    plan_header_t head;
++    bool ok = fread(&head, 1, sizeof(head), f) == sizeof(head) &&
++              head.magic == PLAN_MAGIC && head.version == PLAN_VERSION &&
++              head.len <= PLAN_MAX && head.pos <= head.len &&
++              (head.len == 0 || fread(g_plan, sizeof(plan_entry_t), head.len, f) == head.len);
++    fclose(f);
++    if (!ok) return false;
++    g_plan_hdr = head;
++    return true;
++}
++
++static void plan_build_cards(const uint32_t *ids, unsigned count, uint8_t phase,
++                             unsigned rounds) {
++    plan_reset();
++    g_plan_hdr.phase = phase;
++    unsigned n = 0;
++    /* Round-major: every card is drilled in round 1 before round 2 starts. */
++    for (unsigned round = 0; round < rounds; round++) {
++        for (unsigned card = 0; card < count && n < PLAN_MAX; card++) {
++            g_plan[n].id = ids[card];
++            g_plan[n].stage = rounds == 1 ? VOCAB_STAGE_WORD
++                              : round == 0 ? VOCAB_STAGE_QUIZ
++                              : round == 1 ? VOCAB_STAGE_RECALL
++                                           : VOCAB_STAGE_WORD;
++            g_plan[n].flags = 0;
++            n++;
++        }
++    }
++    g_plan_hdr.len = (uint16_t)n;
++    g_plan_hdr.pos = 0;
++}
++
++/* Cards in the given states, in bank order, that are due now. */
++static unsigned plan_collect(uint8_t state_a, uint8_t state_b, uint32_t now_min,
++                             uint32_t *out, unsigned max) {
++    unsigned n = 0;
++    for (uint32_t i = 0; i < g_count && n < max; i++) {
++        const vocab_state_record_t *record = &g_records[i];
++        if (record->state != state_a && record->state != state_b) continue;
++        if (state_a != VOCAB_STATE_NEW && record->due_min && record->due_min > now_min) continue;
++        out[n++] = i;
++    }
++    if (g_config.shuffle) {
++        for (unsigned i = n; i > 1; i--) {
++            const unsigned j = (unsigned)(rand() % i);
++            const uint32_t tmp = out[i - 1];
++            out[i - 1] = out[j];
++            out[j] = tmp;
++        }
++    }
++    return n;
++}
++
++static bool plan_build_learn(uint32_t now_min) {
++    uint32_t ids[32];
++    const unsigned per_group = (g_config.group_size >= 5 && g_config.group_size <= 20)
++                                   ? g_config.group_size : PLAN_GROUP_SIZE;
++    unsigned n = plan_collect(VOCAB_STATE_NEW, VOCAB_STATE_NEW, now_min, ids, per_group);
++    if (!n)
++        n = plan_collect(VOCAB_STATE_LEARNING, VOCAB_STATE_RELEARNING, now_min, ids, per_group);
++    if (!n) return false;
++    g_plan_hdr.group++;
++    plan_build_cards(ids, n, 0, 3);
++    return true;
++}
++
++static bool plan_build_relearn(void) {
++    uint32_t ids[32];
++    unsigned n = 0;
++    for (uint16_t i = 0; i < g_plan_hdr.len && n < PLAN_GROUP_SIZE; i++) {
++        if (!(g_plan[i].flags & 2)) continue;
++        bool seen = false;
++        for (unsigned k = 0; k < n; k++)
++            if (ids[k] == g_plan[i].id) seen = true;
++        if (!seen) ids[n++] = g_plan[i].id;
++    }
++    if (!n) return false;
++    plan_build_cards(ids, n, 1, 3);
++    return true;
++}
++
++static bool plan_build_review(uint32_t now_min) {
++    uint32_t ids[32];
++    const unsigned per_group = (g_config.group_size >= 5 && g_config.group_size <= 20)
++                                   ? g_config.group_size : PLAN_GROUP_SIZE;
++    unsigned n = plan_collect(VOCAB_STATE_REVIEW, VOCAB_STATE_REVIEW, now_min, ids, per_group);
++    if (!n) return false;
++    plan_build_cards(ids, n, 2, 1);
++    return true;
++}
++
++/* Move to the next plan when the current one is exhausted. */
++static bool plan_advance(uint32_t now_min) {
++    if (g_plan_hdr.pos < g_plan_hdr.len) return true;
++    if (g_plan_hdr.phase != 1 && plan_build_relearn()) return true;
++    if (g_focus == 2) return plan_build_review(now_min);
++    return plan_build_learn(now_min);
++}
++
+ static void queue_push(uint32_t id) {
+     if (!g_queue || g_queue_len >= g_count) return;
+     g_queue[g_queue_len++] = id;
+@@ -686,6 +876,8 @@ bool vocab_open(const char *root, uint32_t now_min) {
+         return false;
+     }
+     journal_replay();
++    g_plan = vocab_alloc(PLAN_MAX, sizeof(plan_entry_t));
++    time_load();
+     g_queue = vocab_alloc(g_count ? g_count : 1, sizeof(uint32_t));
+     vocab_config_load(g_root, &g_config);
+     g_open = true;
+@@ -701,6 +893,8 @@ void vocab_close(uint32_t now_min) {
+     bank_close();
+     free(g_records);
+     free(g_queue);
++    free(g_plan);
++    g_plan = NULL;
+     g_records = NULL;
+     g_queue = NULL;
+     g_count = 0;
+@@ -738,7 +932,27 @@ bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus)
+         g_new_today = 0;
+         g_reviews_today = 0;
+     }
+-    queue_build(now_min, &g_config, focus);
++    g_focus = focus;
++    g_exhausted = false;
++    if (focus == 1 || focus == 2 || focus == 3) {
++        bool usable = plan_load() && g_plan_hdr.focus == (uint8_t)focus &&
++                      g_plan_hdr.pos < g_plan_hdr.len;
++        if (!usable) {
++            bool built = false;
++            if (focus == 3) {
++                uint32_t ids[PLAN_GROUP_SIZE];
++                unsigned n = plan_collect(VOCAB_STATE_LEARNING, VOCAB_STATE_RELEARNING,
++                                          now_min, ids, PLAN_GROUP_SIZE);
++                if (n) { plan_build_cards(ids, n, 1, 3); built = true; }
++            }
++            if (!built && focus == 2) built = plan_build_review(now_min);
++            if (!built) plan_build_learn(now_min);
++            g_plan_hdr.focus = (uint8_t)focus;
++            plan_save();
++        }
++    } else {
++        queue_build(now_min, &g_config, focus);
++    }
+     return true;
+ }
+ 
+@@ -773,7 +987,35 @@ static bool load_card(uint32_t id, vocab_card_t *out, vocab_card_stage_t *stage)
+ }
+ 
+ bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage) {
+-    if (!g_open || !out || !g_queue) return false;
++    if (!g_open || !out) return false;
++    if ((g_focus == 1 || g_focus == 2 || g_focus == 3) && g_plan) {
++        for (;;) {
++            while (g_plan_hdr.pos < g_plan_hdr.len) {
++                plan_entry_t *entry = &g_plan[g_plan_hdr.pos];
++                if ((entry->flags & 1) || entry->id >= g_count) {
++                    g_plan_hdr.pos++;
++                    continue;
++                }
++                g_current = entry->id;
++                g_current_valid = true;
++                g_revealed = false;
++                if (!load_card(entry->id, out, stage)) {
++                    g_plan_hdr.pos++;
++                    continue;
++                }
++                g_stage = (vocab_card_stage_t)entry->stage;
++                if (stage) *stage = g_stage;
++                return true;
++            }
++            if (!plan_advance(g_now)) {
++                g_exhausted = true;
++                g_current_valid = false;
++                return false;
++            }
++            plan_save();
++        }
++    }
++    if (!g_queue) return false;
+     while (g_queue_pos < g_queue_len) {
+         uint32_t id = g_queue[g_queue_pos];
+         if (id >= g_count) {
+@@ -798,6 +1040,18 @@ bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage) {
+     return false;
+ }
+ 
++bool vocab_load_by_id(uint32_t id, vocab_card_t *out, vocab_card_stage_t *stage) {
++    if (!g_open || !out || id >= g_count) return false;
++    return load_card(id, out, stage);
++}
++
++void vocab_abandon_plan(void) {
++    plan_reset();
++    char path[256];
++    plan_path_of(path, sizeof(path));
++    remove(path);
++}
++
+ bool vocab_current_card(vocab_card_t *out, vocab_card_stage_t *stage) {
+     if (!g_open || !g_current_valid || !out) return false;
+     g_revealed = false;
+@@ -827,8 +1081,31 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
+     /* Only due-card answers count as reviews; learning steps are part of study. */
+     if (was_review && g_reviews_today < 0xFFFF) g_reviews_today++;
+ 
+-    if (record->state == VOCAB_STATE_LEARNING || record->state == VOCAB_STATE_RELEARNING) {
+-        /* Remember where the learner stopped so the next session resumes here. */
++    if (g_focus == 1 || g_focus == 2 || g_focus == 3) {
++        if (g_plan_hdr.pos < g_plan_hdr.len) {
++            plan_entry_t *entry = &g_plan[g_plan_hdr.pos];
++            entry->flags = (uint8_t)(1u | (grade == VOCAB_AGAIN ? 2u : 0u));
++            g_plan_hdr.pos++;
++            /* 不背单词 style: a wrong card is retried at the end of its round. */
++            if (g_config.error_mode == 1 && grade == VOCAB_AGAIN && g_plan_hdr.len < PLAN_MAX) {
++                unsigned same = 0;
++                for (uint16_t i = 0; i < g_plan_hdr.len; i++)
++                    if (g_plan[i].id == entry->id && g_plan[i].stage == entry->stage) same++;
++                if (same < 3) {
++                    unsigned insert_at = g_plan_hdr.len;
++                    for (uint16_t i = 0; i < g_plan_hdr.len; i++)
++                        if (g_plan[i].stage == entry->stage) insert_at = (unsigned)i + 1;
++                    memmove(&g_plan[insert_at + 1], &g_plan[insert_at],
++                            (g_plan_hdr.len - insert_at) * sizeof(plan_entry_t));
++                    memset(&g_plan[insert_at], 0, sizeof(plan_entry_t));
++                    g_plan[insert_at].id = entry->id;
++                    g_plan[insert_at].stage = entry->stage;
++                    g_plan_hdr.len++;
++                }
++            }
++            plan_save();
++        }
++    } else if (record->state == VOCAB_STATE_LEARNING || record->state == VOCAB_STATE_RELEARNING) {
+         g_resume_id = g_current;
+         g_resume_day = now_min / VOCAB_MINUTE_PER_DAY;
+         queue_reinsert(g_current);
+@@ -845,7 +1122,13 @@ bool vocab_undo(uint32_t now_min) {
+     vocab_undo_t *undo = &g_undo[g_undo_count % VOCAB_UNDO_DEPTH];
+     if (undo->id >= g_count) return false;
+     g_records[undo->id] = undo->record;
+-    g_queue_pos = undo->queue_pos;
++    if ((g_focus == 1 || g_focus == 2 || g_focus == 3) && g_plan) {
++        g_plan_hdr.pos = (uint16_t)undo->queue_pos;
++        if (g_plan_hdr.pos < g_plan_hdr.len) g_plan[g_plan_hdr.pos].flags = 0;
++        plan_save();
++    } else {
++        g_queue_pos = undo->queue_pos;
++    }
+     g_new_today = undo->new_today;
+     g_reviews_today = undo->reviews_today;
+     g_current = undo->id;
+@@ -866,6 +1149,58 @@ bool vocab_undo(uint32_t now_min) {
+     return true;
+ }
+ 
++static void time_path(char *buf, size_t bytes) { path_of(buf, bytes, "time.dat"); }
++
++static bool time_save(void) {
++    char path[256], tmp[288];
++    time_path(path, sizeof(path));
++    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
++    unsigned char raw[20] = {0};
++    memcpy(raw, "VOCT", 4);
++    memcpy(raw + 4, &g_time_day, 4);
++    memcpy(raw + 8, &g_today_seconds, 4);
++    memcpy(raw + 12, &g_total_seconds, 4);
++    uint32_t crc = crc32_bytes(raw, 16);
++    memcpy(raw + 16, &crc, 4);
++    FILE *f = fopen(tmp, "wb");
++    if (!f) return false;
++    bool ok = fwrite(raw, 1, sizeof(raw), f) == sizeof(raw);
++    fflush(f);
++    fclose(f);
++    if (!ok) { remove(tmp); return false; }
++    remove(path);
++    return rename(tmp, path) == 0;
++}
++
++static void time_load(void) {
++    char path[256];
++    time_path(path, sizeof(path));
++    FILE *f = fopen(path, "rb");
++    if (!f) return;
++    unsigned char raw[20];
++    bool ok = fread(raw, 1, sizeof(raw), f) == sizeof(raw) && memcmp(raw, "VOCT", 4) == 0;
++    fclose(f);
++    if (!ok) return;
++    uint32_t crc = 0;
++    memcpy(&crc, raw + 16, 4);
++    if (crc != crc32_bytes(raw, 16)) return;
++    memcpy(&g_time_day, raw + 4, 4);
++    memcpy(&g_today_seconds, raw + 8, 4);
++    memcpy(&g_total_seconds, raw + 12, 4);
++}
++
++bool vocab_add_seconds(uint32_t seconds) {
++    if (!seconds) return true;
++    const uint32_t today = g_now / VOCAB_MINUTE_PER_DAY;
++    if (g_time_day != today) {
++        g_time_day = today;
++        g_today_seconds = 0;
++    }
++    g_today_seconds += seconds;
++    g_total_seconds += seconds;
++    return time_save();
++}
++
+ bool vocab_stats(uint32_t now_min, vocab_stats_t *out) {
+     if (!g_open || !out) return false;
+     memset(out, 0, sizeof(*out));
+@@ -886,10 +1221,34 @@ bool vocab_stats(uint32_t now_min, vocab_stats_t *out) {
+         }
+         out->total++;
+     }
+-    out->finished = g_queue_pos >= g_queue_len;
++    const uint32_t today = g_now / VOCAB_MINUTE_PER_DAY;
++    out->today_seconds = (g_time_day == today) ? g_today_seconds : 0;
++    out->total_seconds = g_total_seconds;
++    out->finished = g_exhausted;
+     return true;
+ }
+ 
++bool vocab_reset_progress(void) {
++    if (!g_open || !g_records) return false;
++    for (uint32_t i = 0; i < g_count; i++) record_default(&g_records[i]);
++    g_new_today = 0;
++    g_reviews_today = 0;
++    g_streak = 0;
++    g_last_day = 0;
++    g_undo_count = 0;
++    g_resume_id = 0xFFFFFFFFu;
++    g_queue_len = g_queue_pos = 0;
++    plan_reset();
++    char path[256];
++    state_path(path, sizeof(path));
++    remove(path);
++    journal_path(path, sizeof(path));
++    remove(path);
++    plan_path_of(path, sizeof(path));
++    remove(path);
++    return state_save();
++}
++
+ bool vocab_audio_path(uint32_t id, char *buf, size_t bytes) {
+     if (!buf || bytes == 0) return false;
+     snprintf(buf, bytes, "%s/.thingsos/vocab/audio/%u.mp3", g_root, (unsigned)id);
+@@ -911,6 +1270,19 @@ uint32_t vocab_new_count(void) {
+     return fresh;
+ }
+ 
++bool vocab_plan_progress(uint16_t *group, uint8_t *round, uint8_t *index, uint8_t *total,
++                         uint8_t *phase) {
++    if (!g_open || g_plan_hdr.len == 0) return false;
++    const unsigned per_round = g_plan_hdr.len / 3u;
++    if (!per_round) return false;
++    if (group) *group = g_plan_hdr.group;
++    if (round) *round = (uint8_t)(g_plan_hdr.pos / per_round + 1);
++    if (index) *index = (uint8_t)(g_plan_hdr.pos % per_round + 1);
++    if (total) *total = (uint8_t)per_round;
++    if (phase) *phase = g_plan_hdr.phase;
++    return true;
++}
++
+ uint32_t vocab_learned_count(void) {
+     uint32_t learned = 0;
+     for (uint32_t i = 0; i < g_count; i++)
+diff --git a/native/tests/vocab_test.c b/native/tests/vocab_test.c
+index 692ca04..efd85bc 100644
+--- a/native/tests/vocab_test.c
++++ b/native/tests/vocab_test.c
+@@ -235,6 +235,78 @@ int main(void) {
+     CHECK(vocab_count() == 6);
+     vocab_close(now);
+ 
++    /* Review groups: one bare-word pass of ten, 模糊 stays in review while
++       忘记 returns through the three-stage relearn. */
++    char root4[256];
++    snprintf(root4, sizeof(root4), "/tmp/vocab-review-%d", (int)getpid());
++    snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s", root4, root4);
++    CHECK(system(cmd) == 0);
++    write_bank(root4, rows, 6);
++    CHECK(vocab_open(root4, now));
++    vocab_config_t rc = cfg;
++    rc.group_size = 10;
++    CHECK(vocab_begin_session(now, &rc, 1));
++    for (int i = 0; i < 6 * 3; i++) {
++        CHECK(vocab_next(&card, &stage));
++        CHECK(vocab_answer(now, VOCAB_GOOD));
++    }
++    vocab_close(now);
++    const uint32_t later = now + 30u * 24u * 60u;
++    CHECK(vocab_open(root4, later));
++    CHECK(vocab_begin_session(later, &rc, 2));
++    int seen = 0;
++    uint32_t again_id = 0;
++    for (int i = 0; i < 6; i++) {
++        CHECK(vocab_next(&card, &stage));
++        CHECK(stage == VOCAB_STAGE_WORD);
++        seen++;
++        if (i == 0) { again_id = card.id; CHECK(vocab_answer(later, VOCAB_AGAIN)); }
++        else CHECK(vocab_answer(later, i == 1 ? VOCAB_HARD : VOCAB_GOOD));
++    }
++    CHECK(seen == 6);
++    /* The forgotten card comes back as a relearn group starting from the quiz;
++       the fuzzy card does not. */
++    CHECK(vocab_next(&card, &stage));
++    CHECK(card.id == again_id && stage == VOCAB_STAGE_QUIZ);
++    vocab_close(later);
++    snprintf(cmd, sizeof(cmd), "rm -rf %s", root4);
++    CHECK(system(cmd) == 0);
++
++    /* Group model: a group is drilled quiz -> recall -> bare word, and cards
++       that failed any round come back as a relearn group. */
++    char root3[256];
++    snprintf(root3, sizeof(root3), "/tmp/vocab-group-%d", (int)getpid());
++    snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s", root3, root3);
++    CHECK(system(cmd) == 0);
++    write_bank(root3, rows, 6);
++    CHECK(vocab_open(root3, now));
++    vocab_config_t gc = cfg;
++    gc.new_limit = 10;
++    CHECK(vocab_begin_session(now, &gc, 1));
++    uint32_t failed_id = 0;
++    for (int i = 0; i < 6; i++) {
++        CHECK(vocab_next(&card, &stage));
++        CHECK(stage == VOCAB_STAGE_QUIZ);
++        if (i == 1) failed_id = card.id;
++        CHECK(vocab_answer(now, i == 1 ? VOCAB_AGAIN : VOCAB_GOOD));
++    }
++    for (int i = 0; i < 6; i++) {
++        CHECK(vocab_next(&card, &stage));
++        CHECK(stage == VOCAB_STAGE_RECALL);
++        CHECK(vocab_answer(now, VOCAB_GOOD));
++    }
++    for (int i = 0; i < 6; i++) {
++        CHECK(vocab_next(&card, &stage));
++        CHECK(stage == VOCAB_STAGE_WORD);
++        CHECK(vocab_answer(now, VOCAB_GOOD));
++    }
++    /* The failed card reopens as the relearn group, starting from the quiz. */
++    CHECK(vocab_next(&card, &stage));
++    CHECK(card.id == failed_id && stage == VOCAB_STAGE_QUIZ);
++    vocab_close(now);
++    snprintf(cmd, sizeof(cmd), "rm -rf %s", root3);
++    CHECK(system(cmd) == 0);
++
+     /* Undo and resume across a reopen, on a small dedicated bank. */
+     char root2[256];
+     snprintf(root2, sizeof(root2), "/tmp/vocab-resume-%d", (int)getpid());
+@@ -263,7 +335,8 @@ int main(void) {
+     CHECK(vocab_open(root2, reopen));
+     CHECK(vocab_begin_session(reopen, &small, 1));
+     CHECK(vocab_next(&card, &stage));
+-    CHECK(card.id == resume_id && stage == VOCAB_STAGE_RECALL);
++    /* The group resumes on the next card of the round, not at the start. */
++    CHECK(stage == VOCAB_STAGE_QUIZ && card.id != resume_id);
+     vocab_close(reopen);
+     snprintf(cmd, sizeof(cmd), "rm -rf %s", root2);
+     CHECK(system(cmd) == 0);
+-- 
+2.50.1 (Apple Git-155)
+

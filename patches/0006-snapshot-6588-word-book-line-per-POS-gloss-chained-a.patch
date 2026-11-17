@@ -1,0 +1,881 @@
+From e0ee73c2e626a22003ae05da4225139a93c3322b Mon Sep 17 00:00:00 2001
+From: vocab-kit <local@localhost>
+Date: Wed, 18 Nov 2026 01:55:10 +0800
+Subject: [PATCH 6/8] snapshot: 6588-word book, line-per-POS gloss, chained
+ audio, review stats fix
+
+---
+ native/firmware/main/main.c       |   1 +
+ native/firmware/main/vocab_ui.inc | 223 +++++++++++++++++++++++------
+ native/src/vocab.c                |  73 ++++++----
+ native/tests/vocab_test.c         |   5 +-
+ vocab-kit/tools/import_xlsx.py    | 230 ++++++++++++++++++++++++++++++
+ vocab-kit/tools/merge_examples.py | 111 ++++++++++++++
+ 6 files changed, 565 insertions(+), 78 deletions(-)
+ create mode 100644 vocab-kit/tools/import_xlsx.py
+ create mode 100644 vocab-kit/tools/merge_examples.py
+
+diff --git a/native/firmware/main/main.c b/native/firmware/main/main.c
+index a118c29..0dc9a90 100644
+--- a/native/firmware/main/main.c
++++ b/native/firmware/main/main.c
+@@ -4055,6 +4055,7 @@ void app_main(void) {
+            action's dragging latch set after release (notably after Home). */
+         if(!input_contact)pressed=dragging=held=moved=false;
+         if(healthy)auto_sleep_poll(time);
++        vocab_audio_tick();
+         if(app.asleep) {xSemaphoreGive(thingsos_io_lock);continue;}
+         thingsos_board_idle();
+         if(app.page==THINGSOS_UI_LOCK && app.lock_snapshot_valid) {
+diff --git a/native/firmware/main/vocab_ui.inc b/native/firmware/main/vocab_ui.inc
+index 5b97015..70384f3 100644
+--- a/native/firmware/main/vocab_ui.inc
++++ b/native/firmware/main/vocab_ui.inc
+@@ -24,6 +24,8 @@ typedef enum {
+     VOCAB_PHASE_ANSWER,
+ } vocab_phase_t;
+ 
++static uint8_t vu_chain_example;
++
+ static struct {
+     bool started, failed;
+     vocab_screen_t screen;
+@@ -55,10 +57,13 @@ static void vocab_button(int x, int y, int w, int h, const char* text) {
+    readable ASCII instead of drawing empty boxes. */
+ static const char* vocab_phonetic_text(char* out, size_t bytes, const char* in) {
+     static const char* pairs[][2] = {
+-        {"tʃ", "ch"}, {"dʒ", "j"},  {"ˈ", "'"}, {"ˌ", ","}, {"ː", ":"},
++        {"tʃ", "ch"}, {"dʒ", "j"},  {"ʧ", "ch"}, {"ʤ", "j"},  {"ˈ", "'"}, {"ˌ", ","},
++        {"ː", ":"},   {"ˑ", ":"},   {"̃", ""},   {"ʲ", "j"},   {"ʷ", "w"},
+         {"ə", "e"},   {"ɪ", "i"},   {"ʊ", "u"}, {"ʃ", "sh"}, {"ʒ", "zh"},
+         {"ŋ", "ng"},  {"θ", "th"},  {"ð", "dh"}, {"ɔ", "o"}, {"ɒ", "o"},
+         {"ɑ", "a"},   {"ɜ", "er"},  {"ʌ", "u"}, {"æ", "a"}, {"ɡ", "g"},
++        {"ɛ", "e"},   {"ɐ", "a"},   {"ɹ", "r"}, {"ɾ", "t"}, {"ʔ", ""},
++        {"ɚ", "er"},  {"ɝ", "er"},  {"ʉ", "u"}, {"ɨ", "i"}, {"ɫ", "l"},
+     };
+     if (!out || bytes == 0) return in;
+     size_t used = 0;
+@@ -92,15 +97,20 @@ static void vocab_header(const char* title) {
+ 
+ /* Circular "undo" arrow at the top-right, mirroring the back glyph at the left. */
+ static void vocab_undo_icon(void) {
+-    static const signed char arc[][2] = {
+-        {14, 0}, {13, 6}, {10, 10}, {6, 13}, {0, 14}, {-6, 13},
+-        {-10, 10}, {-13, 6}, {-14, 0}, {-13, -6}, {-10, -10}, {-6, -13},
++    static const signed char ring[12][2] = {
++        {11, 0}, {10, 6}, {6, 10}, {0, 11}, {-6, 10}, {-10, 6},
++        {-11, 0}, {-10, -6}, {-6, -10}, {0, -11}, {6, -10}, {10, -6},
+     };
+-    const int cx = 620, cy = 146;
+-    for (unsigned i = 0; i < sizeof(arc) / sizeof(arc[0]); i++)
+-        thingsos_rect(&app.canvas, cx + arc[i][0], cy + arc[i][1], 3, 3, 0);
+-    toolbar_stroke(cx + 6, cy - 20, cx + 16, cy - 12);
+-    toolbar_stroke(cx + 16, cy - 12, cx + 11, cy - 1);
++    const int cx = 620, cy = 148;
++    /* Arc from 90 degrees round to 0, leaving the top-right quadrant open. */
++    for (int i = 3; i <= 12; i++) {
++        const int a = i % 12;
++        toolbar_stroke(cx + ring[i - 1][0], cy + ring[i - 1][1],
++                       cx + ring[a][0], cy + ring[a][1]);
++    }
++    /* Arrowhead at the open end, pointing up along the tangent. */
++    toolbar_stroke(cx + 11, cy - 5, cx + 5, cy - 3);
++    toolbar_stroke(cx + 11, cy - 5, cx + 12, cy + 2);
+ }
+ 
+ 
+@@ -114,15 +124,107 @@ static void vocab_bar(int y, unsigned done, unsigned total) {
+     }
+ }
+ 
++static size_t vocab_utf8_width(const char* s) {
++    const unsigned char c = (unsigned char)*s;
++    if (c < 0x80) return 1;
++    if ((c & 0xF8) == 0xF0) return 4;
++    if ((c & 0xF0) == 0xE0) return 3;
++    return 2;
++}
++
++/* Up to two part-of-speech clauses, kept under 20 characters so the option
++   stays on one centred line. */
+ static const char* vocab_short_meaning(char* out, size_t bytes, const char* in) {
+     size_t used = 0;
+-    while (*in && *in != ';' && strncmp(in, "ï¼", 3) != 0 && used + 1 < bytes && used < 24)
+-        out[used++] = *in++;
+-    if (*in && used + 1 < bytes) out[used++] = 0xE2, out[used++] = 0x80, out[used++] = 0xA6; /* … */
+-    out[used < bytes ? used : bytes - 1] = 0;
++    int chars = 0;
++    while (*in && *in != '\n' && chars < 20) {
++        const size_t w = vocab_utf8_width(in);
++        const bool cut = *in == ';' || strncmp(in, "\xEF\xBC\x9B", 3) == 0;
++        if (cut) {
++            /* try the next part of speech if it still fits */
++            const char* next = in + (w == 1 ? 1 : 3);
++            while (*next == ' ') next++;
++            int extra = 0;
++            const char* probe = next;
++            while (*probe && *probe != '\n' && extra < 14) {
++                const size_t pw = vocab_utf8_width(probe);
++                probe += pw;
++                extra++;
++            }
++            if (*next && *next != '\n' && chars + 1 + extra <= 20) {
++                out[used++] = ' '; chars++;
++                while (*in && *in != '\n' && chars < 20) {
++                    const size_t w2 = vocab_utf8_width(in);
++                    if (used + w2 + 1 >= bytes) break;
++                    memcpy(out + used, in, w2);
++                    used += w2; in += w2; chars++;
++                }
++                continue;
++            }
++            break;
++        }
++        if (used + w + 1 >= bytes) break;
++        memcpy(out + used, in, w);
++        used += w; in += w; chars++;
++    }
++    out[used] = 0;
+     return out;
+ }
+ 
++/* Two balanced lines so an option fills its box instead of ending in dots. */
++static void vocab_draw_option_text(const char* text, int x, int y, int width) {
++    label(text, x, y + 60, 26, width);
++}
++
++static uint32_t vocab_next_cp(const char* s, unsigned* bytes) {
++    const unsigned char c = (unsigned char)s[0];
++    if (c < 0x80) { *bytes = 1; return c; }
++    if ((c & 0xE0) == 0xC0) { *bytes = 2; return ((uint32_t)(c & 0x1F) << 6) | (s[1] & 0x3F); }
++    if ((c & 0xF0) == 0xE0) {
++        *bytes = 3;
++        return ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)(s[1] & 0x3F) << 6) | (s[2] & 0x3F);
++    }
++    *bytes = 4;
++    return ((uint32_t)(c & 0x07) << 18) | ((uint32_t)(s[1] & 0x3F) << 12) |
++           ((uint32_t)(s[2] & 0x3F) << 6) | (s[3] & 0x3F);
++}
++
++/* Wrap using the font's real advance widths: nothing overflows, so the renderer
++   never truncates the tail of a line, and words break at spaces when possible. */
++static int vocab_draw_wrapped(const char* text, int x, int y, int size, int max_lines) {
++    const int max_width = 612;
++    char line[VOCAB_EXAMPLE_BYTES * 2];
++    thingsos_font_size(&app.font, size);
++    size_t start = 0;
++    int lines = 0;
++    while (text[start] && lines < max_lines) {
++        size_t i = start, last_space = (size_t)-1;
++        int used = 0;
++        while (text[i]) {
++            unsigned bytes;
++            const uint32_t cp = vocab_next_cp(text + i, &bytes);
++            const int advance = thingsos_glyph(&app.font, NULL, cp, 0, 0);
++            if (used + advance > max_width) break;
++            used += advance;
++            if (cp == ' ') last_space = i;
++            i += bytes;
++        }
++        if (text[i] && last_space != (size_t)-1 && last_space > start) i = last_space;
++        size_t len = i - start;
++        while (len && text[start + len - 1] == ' ') len--;
++        if (len + 1 >= sizeof(line)) len = sizeof(line) - 2;
++        memcpy(line, text + start, len);
++        line[len] = 0;
++        if (line[0]) label(line, x, y + lines * (size + 8), size, 612);
++        lines++;
++        start = i;
++        while (text[start] == ' ') start++;
++        if (i == start && !text[i]) break;
++        if (!text[i]) break;
++    }
++    return lines;
++}
++
+ static void vocab_build_quiz(void) {
+     char distractors[3][VOCAB_MEANING_BYTES];
+     if (!vocab_distractors(vu.card.id, distractors)) {
+@@ -157,17 +259,25 @@ static void vocab_play_word(void) {
+     if (vocab_audio_path(vu.card.id, audio, sizeof(audio))) vocab_play_file(audio);
+ }
+ 
+-static void vocab_play_stage_audio(void) {
++/* Every screen speaks the word itself. The example sentence is only played
++   when the learner taps the example line. */
++static void vocab_play_stage_audio(void) { vocab_play_word(); }
++
++/* The audio service is single-channel: when the word finishes we start the
++   example sentence so the answer page reads "word, then sentence". */
++static void vocab_audio_tick(void) {
++    if (!vu_chain_example || app.page != THINGSOS_UI_VOCAB) return;
++    thingsos_audio_status_t status;
++    thingsos_audio_status(&status);
++    if (status.state != THINGSOS_AUDIO_IDLE && status.state != THINGSOS_AUDIO_ERROR) return;
++    vu_chain_example = 0;
+     char example[256];
+-    if (vu.stage == VOCAB_STAGE_RECALL && vu.card.example_en[0] &&
+-        vocab_example_audio_path(vu.card.id, example, sizeof(example))) {
+-        vocab_play_file(example);
+-        return;
+-    }
+-    vocab_play_word();
++    if (vocab_example_audio_path(vu.card.id, example, sizeof(example)))
++        thingsos_audio_play(example, 0);
+ }
+ 
+ static bool vocab_load_next(void) {
++    vu_chain_example = 0;
+     vu.revealed = false;
+     vu.answered = false;
+     vu.phase = VOCAB_PHASE_QUESTION;
+@@ -199,6 +309,7 @@ static bool vocab_start(void) {
+ }
+ 
+ static void vocab_stop(void) {
++    vu_chain_example = 0;
+     if (!vu.started) return;
+     thingsos_audio_stop();
+     vocab_close(vocab_now_min());
+@@ -276,24 +387,38 @@ static void vocab_submit(vocab_grade_t grade) {
+     }
+     vu.phase = VOCAB_PHASE_ANSWER;
+     vocab_play_stage_audio();
++    {
++        char example[256];
++        vu_chain_example = vocab_example_audio_path(vu.card.id, example, sizeof(example)) ? 1 : 0;
++    }
+     app.dirty = true;
+ }
+ 
++/* One part of speech per line, exactly as the book splits the gloss. */
++static void vocab_draw_meaning(const char* text, int y) {
++    char buf[VOCAB_MEANING_BYTES];
++    snprintf(buf, sizeof(buf), "%s", text);
++    char* line = buf;
++    for (int row = 0; line && *line && row < 3; row++) {
++        char* next = strchr(line, '\n');
++        if (next) *next = 0;
++        label(line, 36, y + row * 46, 32, 612);
++        line = next ? next + 1 : NULL;
++    }
++}
++
+ static void vocab_draw_answer(void) {
+     vocab_header(vu.screen == VOCAB_SCREEN_REVIEW ? "复习" : "学习");
+     label(vu.card.word, 36, 258, 64, 612);
+     if (vu.card.phonetic[0]) { char ipa[96]; label(vocab_phonetic_text(ipa, sizeof(ipa), vu.card.phonetic), 36, 308, 26, 612); }
+     thingsos_rect(&app.canvas, 36, 330, 612, 1, 0);
+-    if (vu.card.pos[0]) {
+-        char head[VOCAB_MEANING_BYTES + 16];
+-        snprintf(head, sizeof(head), "%s %s", vu.card.pos, vu.card.meaning);
+-        label(head, 36, 396, 34, 612);
+-    } else {
+-        label(vu.card.meaning, 36, 396, 36, 612);
+-    }
+-    if (vu.card.example_en[0]) label(vu.card.example_en, 36, 496, 30, 612);
+-    if (vu.card.example_zh[0]) label(vu.card.example_zh, 36, 546, 30, 612);
+-    int section = 640;
++    vocab_draw_meaning(vu.card.meaning, 392);
++    /* Fixed bands: the example keeps its place whether the gloss is one line or three. */
++    thingsos_rect(&app.canvas, 36, 566, 612, 1, 90);
++    int example_lines = vu.card.example_en[0] ? vocab_draw_wrapped(vu.card.example_en, 36, 622, 32, 3) : 0;
++    if (vu.card.example_zh[0])
++        vocab_draw_wrapped(vu.card.example_zh, 36, 622 + example_lines * 40 + 6, 32, 3);
++    int section = 770;
+     if (vu.card.root[0]) {
+         char line[160];
+         snprintf(line, sizeof(line), "词根：%s", vu.card.root);
+@@ -337,11 +462,12 @@ static void vocab_draw_home(void) {
+     label(line, 36, 366, 22, 612);
+ 
+     label("复习进度", 36, 446, 28, 300);
+-    snprintf(line, sizeof(line), "%u / %u", (unsigned)vu.stats.reviews_today,
+-             (unsigned)vu.stats.due_today);
++    unsigned review_done = vu.stats.reviews_today;
++    if (review_done > vu.stats.due_today) review_done = vu.stats.due_today;
++    snprintf(line, sizeof(line), "%u / %u", review_done, (unsigned)vu.stats.due_today);
+     thingsos_font_size(&app.font, 26);
+     thingsos_label_right(&app.font, &app.canvas, line, 36, 446, 612);
+-    vocab_bar(468, vu.stats.reviews_today, vu.stats.due_today);
++    vocab_bar(468, review_done, vu.stats.due_today);
+     label("到期词会用「认识 / 模糊 / 忘记」复习", 36, 516, 22, 612);
+ 
+     vocab_button(36, 640, 612, 120, "开 始 学 习");
+@@ -361,8 +487,7 @@ static void vocab_draw_quiz(void) {
+         if (marked) app_outline(40, y + 4, 604, 96);
+         char number[4] = {'A' + (char)i, 0, 0, 0};
+         label(number, 56, y + 60, 30, 50);
+-        if (vu.card.pos[0]) label(vu.card.pos, 104, y + 60, 22, 80);
+-        label(vu.options[i], 190, y + 60, 26, 430);
++        vocab_draw_option_text(vu.options[i], 104, y, 520);
+     }
+     if (!vu.answered) vocab_button(36, 1102, 612, 90, "看 答 案");
+ }
+@@ -370,10 +495,15 @@ static void vocab_draw_quiz(void) {
+ static void vocab_draw_recall(void) {
+     vocab_header(vu.screen == VOCAB_SCREEN_REVIEW ? "复习" : "学习");
+     label(vu.card.word, 36, 258, 64, 612);
+-    if (vu.card.phonetic[0]) { char ipa[96]; label(vocab_phonetic_text(ipa, sizeof(ipa), vu.card.phonetic), 36, 308, 26, 612); }
++    if (vu.card.phonetic[0]) {
++        char ipa[96];
++        label(vocab_phonetic_text(ipa, sizeof(ipa), vu.card.phonetic), 36, 308, 26, 612);
++    }
+     thingsos_rect(&app.canvas, 36, 330, 612, 1, 0);
+-    if (vu.stage == VOCAB_STAGE_RECALL && vu.card.example_en[0])
+-        label(vu.card.example_en, 36, 400, 30, 612);
++    /* Middle band stays empty while recalling: the gloss appears only after the
++       grade, on the answer screen, so the bands never move. */
++    thingsos_rect(&app.canvas, 36, 566, 612, 1, 90);
++    if (vu.card.example_en[0]) vocab_draw_wrapped(vu.card.example_en, 36, 622, 32, 4);
+     if (vu.stage == VOCAB_STAGE_RECALL) {
+         vocab_button(36, 1102, 290, 90, "认识");
+         vocab_button(358, 1102, 290, 90, "不认识");
+@@ -442,9 +572,8 @@ static bool vocab_tap(int x, int y) {
+     }
+     (void)x;
+     if (vu.failed) return true;
+-    /* The shell navigation is hidden on this page: tapping the bottom strip
+-       leaves the app, which is what the old "返回应用" row did. */
+-    if (y >= 1200) { vocab_leave(); return true; }
++    /* No bottom-edge exit: the panel's last rows receive stray taps and an
++       implicit leave looked like a crash. Leaving is MENU / HOME / "<" only. */
+ 
+     if (vu.screen == VOCAB_SCREEN_HOME) {
+         if (y >= 640 && y < 760) { vocab_start_learn(); return true; }
+@@ -461,18 +590,18 @@ static bool vocab_tap(int x, int y) {
+         vocab_play_word();
+         return true;
+     }
+-    if (y >= 380 && y < 560 && vu.card.example_en[0]) {
+-        char example[256];
+-        if (vocab_example_audio_path(vu.card.id, example, sizeof(example)))
+-            vocab_play_file(example);
+-        return true;
+-    }
+ 
+     if (vu.phase == VOCAB_PHASE_ANSWER) {
+         if (x >= 580 && y >= 74 && y < 205) {
+             vocab_do_undo();
+             return true;
+         }
++        if (y >= 600 && y < 780 && vu.card.example_en[0]) {
++            char example[256];
++            if (vocab_example_audio_path(vu.card.id, example, sizeof(example)))
++                vocab_play_file(example);
++            return true;
++        }
+         if (y >= 1102 && y < 1196) {
+             if (x >= 358) {
+                 vocab_submit(VOCAB_AGAIN);
+diff --git a/native/src/vocab.c b/native/src/vocab.c
+index e7d4023..0eb08cc 100644
+--- a/native/src/vocab.c
++++ b/native/src/vocab.c
+@@ -19,10 +19,16 @@
+ #include <unistd.h>
+ 
+ #ifdef ESP_PLATFORM
++#include "esp_heap_caps.h"
+ #include "esp_log.h"
+ #define VOCAB_LOG(...) ESP_LOGI("vocab", __VA_ARGS__)
++static void *vocab_alloc(size_t count, size_t size) {
++    void *mem = heap_caps_calloc(count, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
++    return mem ? mem : calloc(count, size);
++}
+ #else
+ #define VOCAB_LOG(...) ((void)0)
++static void *vocab_alloc(size_t count, size_t size) { return calloc(count, size); }
+ #endif
+ 
+ #define VOCAB_STATE_MAGIC "VOCS"
+@@ -294,33 +300,33 @@ static bool bank_open(void) {
+     memcpy(&stored, head + 28, 4);
+     if (stored != crc32_bytes(head, 28)) return false;
+     g_bank.count = count;
+-    /* Load the whole index once (32 B per card): 5000 cards = 160 KB from PSRAM. */
+-    g_index = calloc(count, sizeof(vocab_index_t));
++    /* Read the whole index once, in PSRAM (6588 cards = 264 KB). */
++    g_index = vocab_alloc(count, sizeof(vocab_index_t));
+     if (g_index) {
+-        for (uint32_t i = 0; i < count; i++) {
+-            if (fseek(g_bank.file, (long)(g_bank.index_off + i * g_bank.entry_bytes), SEEK_SET) != 0) {
+-                free(g_index);
+-                g_index = NULL;
+-                break;
+-            }
+-            unsigned char raw[VOCAB_INDEX_ENTRY] = {0};
+-            if (fread(raw, 1, g_bank.entry_bytes, g_bank.file) != g_bank.entry_bytes) {
+-                free(g_index);
+-                g_index = NULL;
+-                break;
+-            }
+-            memcpy(&g_index[i].word_off, raw + 0, 4);
+-            memcpy(&g_index[i].meaning_off, raw + 4, 4);
+-            memcpy(&g_index[i].example_en_off, raw + 8, 4);
+-            memcpy(&g_index[i].example_zh_off, raw + 12, 4);
+-            memcpy(&g_index[i].root_off, raw + 16, 4);
+-            memcpy(&g_index[i].phonetic_off, raw + 20, 4);
+-            memcpy(&g_index[i].group_off, raw + 24, 4);
+-            memcpy(&g_index[i].pos_off, raw + 28, 4);
+-            if (g_bank.entry_bytes >= 40) {
+-                memcpy(&g_index[i].derived_off, raw + 32, 4);
+-                memcpy(&g_index[i].phrase_off, raw + 36, 4);
++        const size_t raw_bytes = (size_t)count * g_bank.entry_bytes;
++        unsigned char *raw = vocab_alloc(1, raw_bytes);
++        if (!raw || fseek(g_bank.file, (long)g_bank.index_off, SEEK_SET) != 0 ||
++            fread(raw, 1, raw_bytes, g_bank.file) != raw_bytes) {
++            free(raw);
++            free(g_index);
++            g_index = NULL;
++        } else {
++            for (uint32_t i = 0; i < count; i++) {
++                const unsigned char *row = raw + (size_t)i * g_bank.entry_bytes;
++                memcpy(&g_index[i].word_off, row + 0, 4);
++                memcpy(&g_index[i].meaning_off, row + 4, 4);
++                memcpy(&g_index[i].example_en_off, row + 8, 4);
++                memcpy(&g_index[i].example_zh_off, row + 12, 4);
++                memcpy(&g_index[i].root_off, row + 16, 4);
++                memcpy(&g_index[i].phonetic_off, row + 20, 4);
++                memcpy(&g_index[i].group_off, row + 24, 4);
++                memcpy(&g_index[i].pos_off, row + 28, 4);
++                if (g_bank.entry_bytes >= 40) {
++                    memcpy(&g_index[i].derived_off, row + 32, 4);
++                    memcpy(&g_index[i].phrase_off, row + 36, 4);
++                }
+             }
++            free(raw);
+         }
+     }
+     return true;
+@@ -345,7 +351,7 @@ static void record_default(vocab_state_record_t *record) {
+ 
+ static bool state_load(void) {
+     g_count = g_bank.count;
+-    g_records = calloc(g_count, sizeof(vocab_state_record_t));
++    g_records = vocab_alloc(g_count, sizeof(vocab_state_record_t));
+     if (!g_records) return false;
+     for (uint32_t i = 0; i < g_count; i++) record_default(&g_records[i]);
+ 
+@@ -376,7 +382,7 @@ static bool state_load(void) {
+         return true;
+     }
+     size_t bytes = (size_t)g_count * sizeof(vocab_state_record_t);
+-    vocab_state_record_t *tmp = malloc(bytes);
++    vocab_state_record_t *tmp = vocab_alloc(1, bytes);
+     if (!tmp) {
+         fclose(f);
+         return false;
+@@ -680,7 +686,7 @@ bool vocab_open(const char *root, uint32_t now_min) {
+         return false;
+     }
+     journal_replay();
+-    g_queue = calloc(g_count ? g_count : 1, sizeof(uint32_t));
++    g_queue = vocab_alloc(g_count ? g_count : 1, sizeof(uint32_t));
+     vocab_config_load(g_root, &g_config);
+     g_open = true;
+     g_current_valid = false;
+@@ -804,6 +810,7 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
+     g_now = now_min;
+     vocab_state_record_t *record = &g_records[g_current];
+     const bool was_new = record->state == VOCAB_STATE_NEW;
++    const bool was_review = record->state == VOCAB_STATE_REVIEW || record->state == VOCAB_STATE_RELEARNING;
+ 
+     vocab_undo_t *undo = &g_undo[g_undo_count % VOCAB_UNDO_DEPTH];
+     undo->id = g_current;
+@@ -817,7 +824,8 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
+     journal_append(g_current, record);
+     g_queue_pos++;
+     if (was_new && g_new_today < 0xFFFF) g_new_today++;
+-    if (g_reviews_today < 0xFFFF) g_reviews_today++;
++    /* Only due-card answers count as reviews; learning steps are part of study. */
++    if (was_review && g_reviews_today < 0xFFFF) g_reviews_today++;
+ 
+     if (record->state == VOCAB_STATE_LEARNING || record->state == VOCAB_STATE_RELEARNING) {
+         /* Remember where the learner stopped so the next session resumes here. */
+@@ -869,7 +877,12 @@ bool vocab_stats(uint32_t now_min, vocab_stats_t *out) {
+         const vocab_state_record_t *record = &g_records[i];
+         if (record->state != VOCAB_STATE_NEW) {
+             out->learned++;
+-            if (record->due_min && record->due_min <= g_now) out->due_today++;
++            /* Due today only: review cards whose interval has elapsed. Cards
++               learned today (due tomorrow or in a few minutes of learning) are
++               not part of today's review queue. */
++            if ((record->state == VOCAB_STATE_REVIEW || record->state == VOCAB_STATE_RELEARNING) &&
++                record->due_min && record->due_min <= g_now)
++                out->due_today++;
+         }
+         out->total++;
+     }
+diff --git a/native/tests/vocab_test.c b/native/tests/vocab_test.c
+index 8dee55c..692ca04 100644
+--- a/native/tests/vocab_test.c
++++ b/native/tests/vocab_test.c
+@@ -209,7 +209,10 @@ int main(void) {
+     CHECK(vocab_open(root, t));
+     CHECK(vocab_learned_count() == 1);
+     CHECK(vocab_stats(t, &stats));
+-    CHECK(stats.reviews_today >= 3);
++    /* Learning answers are not reviews; the counter stays at zero until a
++       scheduled review card is graded. */
++    CHECK(stats.reviews_today == 0);
++    CHECK(stats.due_today <= stats.learned);
+     (void)second_id;
+ 
+     /* Classic mode uses the fixed Ebbinghaus table. */
+diff --git a/vocab-kit/tools/import_xlsx.py b/vocab-kit/tools/import_xlsx.py
+new file mode 100644
+index 0000000..4aeda8c
+--- /dev/null
++++ b/vocab-kit/tools/import_xlsx.py
+@@ -0,0 +1,230 @@
++#!/usr/bin/env python3
++"""Import a workbook word list into the vocabulary bank CSV.
++
++The workbook keeps the learner's own data: word, part of speech and Chinese
++gloss. This script adds a phonetic transcription (offline CMU->IPA) and, when a
++Tatoeba pair file is supplied, an example sentence + translation.
++
++    ~/.venvs/piper/bin/python vocab-kit/tools/import_xlsx.py \
++        --xlsx 单词背诵记录6591.xlsx --tatoeba ~/vocab-data/cmn.txt \
++        --out build/book/bank.csv
++"""
++from __future__ import annotations
++
++import argparse
++import collections
++import csv
++import re
++import sys
++from pathlib import Path
++
++import unicodedata
++
++import openpyxl
++
++# The workbook was produced by a tool that substituted Kangxi radicals and
++# CJK compatibility ideographs for the real characters (⼈ for 人, ⽬ for 目).
++# The device font has no glyphs for those blocks, so map them back.
++_COMPAT_RANGES = ((0x2E80, 0x2EFF), (0x2F00, 0x2FDF), (0xF900, 0xFAFF), (0xFE30, 0xFE4F))
++
++# CJK Radicals Supplement has no NFKC mapping of its own.
++_RARE = {"幚": "帮", "覚": "觉", "迺": "乃", "囓": "啮", "蹚": "涉", "戶": "户"}
++
++_RADICALS = {
++    "⻋": "车", "⻓": "长", "⻛": "风", "⺠": "民", "⻅": "见", "⻝": "食",
++    "⻔": "门", "⻢": "马", "⻜": "飞", "⻆": "角", "⻘": "青", "⻥": "鱼",
++    "⻩": "黄", "⻣": "骨", "⻤": "鬼", "⻦": "鸟", "⻮": "齿", "⻬": "齐",
++    "⻰": "龙", "⻉": "贝", "⻨": "麦", "⻚": "页", "㬵": "胶",
++}
++
++
++def normalize_cjk(text: str) -> str:
++    out = []
++    for ch in text:
++        out.append(_RADICALS.get(ch) or (unicodedata.normalize("NFKC", ch)
++                                          if any(lo <= ord(ch) <= hi for lo, hi in _COMPAT_RANGES) else ch))
++    return "".join(out)
++
++
++def to_simplified(text: str) -> str:
++    """The device font is simplified-only; Tatoeba pairs are often traditional."""
++    try:
++        from opencc import OpenCC
++    except Exception:
++        return text
++    text = OpenCC("t2s").convert(text)
++    return "".join(_RARE.get(ch, ch) for ch in text)
++
++POS_RE = re.compile(r"^(n|v|vt|vi|adj|adv|prep|conj|pron|num|int|art|aux|phr|abbr)\.\s*", re.I)
++POS_ALIASES = {"a.": "adj.", "ad.": "adv."}
++
++
++POS_GROUP_RE = re.compile(
++    r"(?:n|v|vt|vi|adj|adv|prep|conj|pron|num|int|art|aux|phr|abbr|det|vlink)\.", re.I)
++
++
++def split_senses(text: str) -> list[str]:
++    """Split a gloss into one line per part of speech.
++
++    "adj. 根本的 n. 激进分子"  ->  ["adj. 根本的", "n. 激进分子"]
++    "vt. vi. 散发；发出 vi. 呈辐射状"  ->  ["vt. vi. 散发；发出", "vi. 呈辐射状"]
++    """
++    text = " ".join(text.split())
++
++    def has_sense(segment: str) -> bool:
++        return POS_GROUP_RE.sub("", segment).strip() not in ("", ";", ",", "；", "，")
++
++    segments: list[str] = []
++    current = ""
++    i = 0
++    n = len(text)
++    while i < n:
++        match = POS_GROUP_RE.match(text, i)
++        boundary = i == 0 or text[i - 1] in " ;；,，、()（）"
++        if match and boundary and has_sense(current):
++            segments.append(current.strip())
++            current = ""
++        if match:
++            # take the whole run of consecutive markers as this line's prefix
++            j = match.end()
++            prefix = text[i:j]
++            while True:
++                k = j
++                while k < n and text[k] == " ":
++                    k += 1
++                nxt = POS_GROUP_RE.match(text, k)
++                if not nxt:
++                    break
++                prefix += " " + text[k:nxt.end()]
++                j = nxt.end()
++            current += prefix
++            i = j
++            continue
++        current += text[i]
++        i += 1
++    if current.strip():
++        segments.append(current.strip())
++    return segments or [text]
++
++
++def phonetic(word: str) -> str:
++    try:
++        import eng_to_ipa as ipa
++    except Exception:
++        return ""
++    try:
++        result = ipa.convert(word.lower())
++    except Exception:
++        return ""
++    if "*" in result:  # unknown word
++        return ""
++    return f"/{result.strip()}/"
++
++
++def load_pairs(path: Path) -> list[tuple[str, str]]:
++    pairs: list[tuple[str, str]] = []
++    with path.open("r", encoding="utf-8") as handle:
++        for line in handle:
++            cols = line.rstrip("\n").split("\t")
++            if len(cols) >= 2 and cols[0] and cols[1]:
++                pairs.append((cols[0].strip(), cols[1].strip()))
++    return pairs
++
++
++def variants(word: str) -> set[str]:
++    w = word.lower()
++    out = {w, w + "s", w + "es", w + "ed", w + "ing", w + "d"}
++    if w.endswith("e"):
++        out |= {w[:-1] + "ing", w + "d"}
++    if w.endswith("y"):
++        out |= {w[:-1] + "ies", w[:-1] + "ied"}
++    return out
++
++
++def build_examples(pairs: list[tuple[str, str]]) -> dict[str, tuple[str, str]]:
++    index: dict[str, list[tuple[str, str]]] = collections.defaultdict(list)
++    for en, zh in pairs:
++        for token in set(re.findall(r"[a-zA-Z][a-zA-Z'-]+", en.lower())):
++            index[token].append((en, zh))
++    chosen: dict[str, tuple[str, str]] = {}
++
++    def pick(word: str) -> tuple[str, str] | None:
++        best = None
++        for variant in variants(word):
++            for en, zh in index.get(variant, ())[:40]:
++                n = len(en.split())
++                if 4 <= n <= 16:
++                    score = abs(n - 9)
++                    if best is None or score < best[0]:
++                        best = (score, en, zh)
++        return (best[1], best[2]) if best else None
++
++    return chosen, pick
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--xlsx", required=True, type=Path)
++    parser.add_argument("--out", required=True, type=Path)
++    parser.add_argument("--tatoeba", type=Path)
++    parser.add_argument("--sheet", default="单词列表")
++    args = parser.parse_args()
++
++    workbook = openpyxl.load_workbook(args.xlsx, read_only=True, data_only=True)
++    sheet = workbook[args.sheet]
++    entries: list[dict[str, str]] = []
++    seen: set[str] = set()
++    for row in sheet.iter_rows(min_row=3, values_only=True):
++        if len(row) < 5:
++            continue
++        word, pos, meaning = row[2], row[3], row[4]
++        if not word or not meaning:
++            continue
++        word = normalize_cjk(str(word).strip())
++        if not word or word.lower() in seen:
++            continue
++        seen.add(word.lower())
++        pos_text = str(pos or "").strip()
++        pos_text = POS_ALIASES.get(pos_text, pos_text)
++        # Keep the gloss verbatim: it carries every part of speech the book lists
++        # (e.g. "vt. vi. 散发… vi. 呈辐射状…"), which a single pos column cannot.
++        entries.append({
++            "word": word,
++            "phonetic": phonetic(word),
++            "pos": pos_text,
++            "meaning": "\n".join(split_senses(to_simplified(normalize_cjk(str(meaning))))),
++            "example_en": "",
++            "example_zh": "",
++            "root": "",
++            "group": "",
++            "derived": "",
++            "phrase": "",
++        })
++
++    covered = 0
++    if args.tatoeba and args.tatoeba.is_file():
++        pairs = load_pairs(args.tatoeba)
++        _, pick = build_examples(pairs)
++        for entry in entries:
++            found = pick(entry["word"])
++            if found:
++                entry["example_en"], entry["example_zh"] = found[0], to_simplified(normalize_cjk(found[1]))
++                covered += 1
++
++    args.out.parent.mkdir(parents=True, exist_ok=True)
++    columns = ["word", "phonetic", "pos", "meaning", "example_en", "example_zh",
++               "root", "group", "derived", "phrase"]
++    with args.out.open("w", encoding="utf-8", newline="") as handle:
++        writer = csv.DictWriter(handle, fieldnames=columns)
++        writer.writeheader()
++        writer.writerows(entries)
++
++    print(f"words={len(entries)} duplicates_skipped={len(seen) - len(entries)}")
++    print(f"phonetic={sum(1 for e in entries if e['phonetic'])}")
++    print(f"examples={covered}")
++    print(f"wrote {args.out}")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+diff --git a/vocab-kit/tools/merge_examples.py b/vocab-kit/tools/merge_examples.py
+new file mode 100644
+index 0000000..3347a93
+--- /dev/null
++++ b/vocab-kit/tools/merge_examples.py
+@@ -0,0 +1,111 @@
++#!/usr/bin/env python3
++"""Merge generated example sentences back into the bank CSV.
++
++Reads every `build/book/batches/ex-*.tsv` (word, example_en, example_zh) and
++fills the matching row in the bank CSV, validating that the headword really
++appears in the sentence. Rows that fail validation keep their previous example
++(or stay empty) and are listed in the report.
++
++    python3 vocab-kit/tools/merge_examples.py --csv build/book/bank.csv \
++        --examples build/book/batches --out build/book/bank.csv
++"""
++from __future__ import annotations
++
++import argparse
++import csv
++import glob
++import re
++import sys
++from pathlib import Path
++
++CJK = re.compile(r"[\u4e00-\u9fff]")
++
++_RARE = {"幚": "帮", "覚": "觉", "迺": "乃", "囓": "啮", "蹚": "涉", "戶": "户"}
++
++
++def fix_zh(text: str) -> str:
++    try:
++        from import_xlsx import normalize_cjk, to_simplified
++        text = to_simplified(normalize_cjk(text))
++    except Exception:
++        pass
++    return "".join(_RARE.get(ch, ch) for ch in text)
++
++
++def headword_forms(word: str) -> set[str]:
++    w = word.lower().strip()
++    forms = {w}
++    if " " in w:
++        return forms
++    if w.endswith("e"):
++        forms |= {w + "d", w + "s", w[:-1] + "ing"}
++    if w.endswith("y"):
++        forms |= {w[:-1] + "ies", w[:-1] + "ied"}
++    forms |= {w + "s", w + "es", w + "ed", w + "ing"}
++    return forms
++
++
++def main() -> int:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--csv", required=True, type=Path)
++    parser.add_argument("--examples", required=True, type=Path)
++    parser.add_argument("--out", required=True, type=Path)
++    args = parser.parse_args()
++
++    rows = list(csv.DictReader(args.csv.open("r", encoding="utf-8")))
++    by_word = {row["word"].lower(): row for row in rows}
++
++    generated = 0
++    bad: list[str] = []
++    seen_words: set[str] = set()
++    files = sorted(glob.glob(str(args.examples / "ex-*.tsv")))
++    files = [f for f in files if not re.search(r"\.part\d+\.", f)]
++    for path in files:
++        with open(path, "r", encoding="utf-8") as handle:
++            first = handle.readline()
++            handle.seek(0)
++            if "example_en" in first.split("\t")[:3]:
++                handle.readline()  # skip header row
++            for line in handle:
++                cols = line.rstrip("\n").split("\t")
++                if len(cols) < 3:
++                    continue
++                word, en, zh = cols[0].strip(), cols[1].strip(), cols[2].strip()
++                row = by_word.get(word.lower())
++                if row is None:
++                    bad.append(f"{word}: not in bank")
++                    continue
++                if word.lower() in seen_words:
++                    bad.append(f"{word}: duplicate")
++                    continue
++                words = en.split()
++                if not (4 <= len(words) <= 18):
++                    bad.append(f"{word}: bad length")
++                    continue
++                if not any(form in en.lower() for form in headword_forms(word)):
++                    bad.append(f"{word}: headword missing")
++                    continue
++                if not CJK.search(zh):
++                    bad.append(f"{word}: no chinese")
++                    continue
++                row["example_en"] = en
++                row["example_zh"] = fix_zh(zh)
++                seen_words.add(word.lower())
++                generated += 1
++
++    with args.out.open("w", encoding="utf-8", newline="") as handle:
++        writer = csv.DictWriter(handle, fieldnames=list(rows[0].keys()))
++        writer.writeheader()
++        writer.writerows(rows)
++
++    filled = sum(1 for row in rows if row["example_en"].strip())
++    print(f"files={len(files)} merged={generated} rejected={len(bad)}")
++    print(f"rows_with_example={filled}/{len(rows)}")
++    if bad:
++        print("rejected sample: " + "; ".join(bad[:20]))
++        (Path(str(args.out) + ".rejected.txt")).write_text("\n".join(bad), encoding="utf-8")
++    return 0
++
++
++if __name__ == "__main__":
++    sys.exit(main())
+-- 
+2.50.1 (Apple Git-155)
+

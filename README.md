@@ -1,3 +1,75 @@
+# 背单词（Vocabulary）— ThingsOS 电子墨水单词卡应用
+
+这是 [ThingsOS](https://github.com/MindReset/read_pico_firmware) `0.2.0` 的一个分支，
+在 Metalio E-Ink4-Plus（ESP32-S31，16 MB Flash / 16 MB PSRAM）上增加了一个
+**不背单词风格**的单词学习应用：6588 词的词书、三轮学习、记忆曲线复习、
+离线发音、统计概览与设置页。
+
+> 本仓库包含上游完整源码；背单词应用位于 `native/src/vocab*.c` 与
+> `native/firmware/main/vocab_ui.inc`，对上游的改动集中在这几处：
+> `native/include/thingsos/ui.h`、`native/firmware/main/apps_controls.inc`、
+> `native/firmware/main/main.c`、两个 `CMakeLists.txt`。补丁序列见 `patches/`。
+
+## 功能
+
+- **6588 词书**：词性按“一个词性一行”显示，四选一取最常用义项；
+- **学习**：10 词一组，三轮（四选一 → 例句回想 → 裸词回想），失败的词自动进入重学组；
+- **复习**：10 词一组单轮，认识/模糊/忘记三档；模糊只缩短间隔，忘记进入重学；
+- **记忆曲线**：FSRS-6（可切经典模式），目标保持率可调；
+- **离线发音**：Piper 生成的单词与例句 MP3，进屏自动朗读，可点按重播；
+- **底栏与统计**：「我的」页显示今日/累计词数与学习时长；
+- **设置页**：每日新词目标、复习上限、每组词数、保持率、算法、乱序、自动发音、答错处理、清空进度；
+- **断点续学**：退出再进从组内原位继续。
+
+## 快速开始
+
+```bash
+git clone https://github.com/SuSd-1/thingsos-vocab.git
+cd thingsos-vocab
+
+# 1. 构建主机测试（不需要硬件）
+cmake -S native -B build/host -DCMAKE_BUILD_TYPE=Release
+cmake --build build/host --target thingsos_vocab_test -j
+./build/host/thingsos_vocab_test
+
+# 2. 构建设备固件（需要 ESP-IDF v6.1 与 esp32s31 支持）
+. ~/esp/esp-idf/export.sh
+cd native/firmware
+idf.py --preview -B ../../build/native-idf -DTHINGSOS_BUILD_VERSION=0.2.0-vocab build
+
+# 3. 只刷主应用分区（0x220000）
+esptool --chip esp32s31 -p /dev/cu.usbmodem101 -b 460800 \
+  --before default-reset --after hard-reset \
+  write-flash 0x220000 ../../build/native-idf/ThingsOS_native.bin
+```
+
+词库与音频通过 USB 直连写入 SD 卡：
+`/sdcard/.thingsos/vocab/{bank.bin, audio/<id>.mp3, audio/<id>_ex.mp3}`。
+
+详细步骤见 [`docs/QUICKSTART.md`](docs/QUICKSTART.md)，
+词书制作见 [`docs/VOCAB-DATA.md`](docs/VOCAB-DATA.md)。
+
+## 目录
+
+| 路径 | 内容 |
+|---|---|
+| `native/src/vocab.c`、`vocab_fsrs.c` | 词库、调度（FSRS-6）、组队计划 |
+| `native/firmware/main/vocab_ui.inc` | 全部界面：首页、学习、复习、设置、统计 |
+| `vocab-kit/scripts/` | 导入上游、构建、刷机、备份脚本 |
+| `vocab-kit/tools/` | 词书导入、例句合并、Piper 发音生成、打包 |
+| `patches/` | 相对上游 0.2.0 的补丁序列 |
+| `samples/` | 10 词样例词库与 3 个示例音频 |
+| `docs/` | 快速开始、词书数据管线、构建与排障 |
+
+## 许可与署名
+
+- 上游 ThingsOS：保留原 `LICENSE`（Apache-2.0）与 `THIRD_PARTY_NOTICES.md`；
+- 例句：Tatoeba 语料（CC-BY 2.0，tatoeba.org）；
+- 发音：Piper 语音模型（en_US-lessac-medium，模型自带许可）；
+- 系统字体：方正屏显雅宋，授权见 `licenses/`。
+
+---
+
 # ThingsOS 0.2.0 — Metalio E-Ink4-Plus
 
 Independent ESP-IDF firmware for the Metalio E-Ink4-Plus (ESP32-S31).

@@ -1,0 +1,1238 @@
+From 63fe9909bea111b2a459fe396fba097024f9d0be Mon Sep 17 00:00:00 2001
+From: vocab-kit <local@localhost>
+Date: Tue, 17 Nov 2026 04:46:54 +0800
+Subject: [PATCH 4/8] vocab: home page, three-stage learning ladder and review
+ booster
+
+- core: learning levels (quiz -> example -> bare word), focus sessions,
+  distractors, pos in bank v3, HARD/AGAIN review re-enters the ladder
+- ui: home with learn/review progress, quiz screen, review card, done screen
+- flash delta vs official 0.2.0: +16240 bytes
+---
+ native/firmware/main/vocab_ui.inc | 478 +++++++++++++++++++++---------
+ native/include/thingsos/vocab.h   |  11 +
+ native/src/vocab.c                | 262 +++++++++++-----
+ native/tests/vocab_test.c         |  89 +++---
+ vocab-kit/docs/VOCAB.md           |  14 +-
+ vocab-kit/tools/vocab_pack.py     |   6 +-
+ 6 files changed, 604 insertions(+), 256 deletions(-)
+
+diff --git a/native/firmware/main/vocab_ui.inc b/native/firmware/main/vocab_ui.inc
+index 71193ef..6f1ef6f 100644
+--- a/native/firmware/main/vocab_ui.inc
++++ b/native/firmware/main/vocab_ui.inc
+@@ -1,183 +1,370 @@
+ /* SPDX-License-Identifier: Apache-2.0
+- * Offline word cards. Same visual language as the rest of the launcher:
+- * header(), single-pixel rules, 36 px side margins, outlined buttons.
++ * Word cards: home, learning ladder (quiz -> example -> bare word) and review.
++ * All canvas/input state stays on the UI task; every screen uses the shared
++ * header / rule / outlined-button language of the launcher.
+  */
+ #include "thingsos/vocab.h"
++
++#define VOCAB_UX_MINUTES_2020 26297280u
++#define VOCAB_OPTION_ROWS 4
++
++typedef enum {
++    VOCAB_SCREEN_HOME = 0,
++    VOCAB_SCREEN_LEARN,
++    VOCAB_SCREEN_REVIEW,
++    VOCAB_SCREEN_DONE,
++} vocab_screen_t;
++
+ static struct {
+-    bool started, ready, failed, revealed, finished;
++    bool started, failed;
++    vocab_screen_t screen;
+     vocab_card_t card;
+     vocab_card_stage_t stage;
+     vocab_stats_t stats;
+     vocab_config_t config;
+-    uint32_t opened_min;
+-    char audio[256];
+-    bool audio_ok;
+-} vocab_ui;
+-
+-#define VOCAB_UX_MINUTES_2020 26297280u /* Unix minutes at 2020-01-01 */
++    bool revealed;
++    char options[VOCAB_OPTION_ROWS][VOCAB_MEANING_BYTES];
++    uint8_t option_count, answer_at;
++    bool answered, answer_ok;
++    bool booster;
++    uint32_t learned_before;
++} vu;
+ 
+ static uint32_t vocab_now_min(void) {
+     uint32_t seconds = 0;
+-    if (!thingsos_board_time(&seconds)) return vocab_ui.opened_min;
++    if (!thingsos_board_time(&seconds)) return 0;
+     uint32_t minutes = seconds / 60u;
+     return minutes > VOCAB_UX_MINUTES_2020 ? minutes - VOCAB_UX_MINUTES_2020 : 0u;
+ }
+ 
++static void vocab_button(int x, int y, int w, int h, const char* text) {
++    app_outline(x, y, w, h);
++    centered_label(text, x, y + h / 2 + 11, 30, w);
++}
++
++static void vocab_bar(int y, unsigned done, unsigned total) {
++    thingsos_rect(&app.canvas, 36, y, 612, 18, 0);
++    thingsos_rect(&app.canvas, 38, y + 2, 608, 14, 235);
++    if (total) {
++        unsigned width = (unsigned)((uint64_t)608 * done / total);
++        if (width) thingsos_rect(&app.canvas, 38, y + 2, (int)width, 14, 120);
++    }
++}
++
++static void vocab_build_quiz(void) {
++    char distractors[3][VOCAB_MEANING_BYTES];
++    if (!vocab_distractors(vu.card.id, distractors)) {
++        snprintf(distractors[0], sizeof(distractors[0]), "—");
++        snprintf(distractors[1], sizeof(distractors[1]), "—");
++        snprintf(distractors[2], sizeof(distractors[2]), "—");
++    }
++    vu.option_count = VOCAB_OPTION_ROWS;
++    vu.answer_at = (uint8_t)(vu.card.id % VOCAB_OPTION_ROWS);
++    unsigned k = 0;
++    for (unsigned i = 0; i < VOCAB_OPTION_ROWS; i++) {
++        if (i == vu.answer_at)
++            snprintf(vu.options[i], sizeof(vu.options[i]), "%s", vu.card.meaning);
++        else
++            snprintf(vu.options[i], sizeof(vu.options[i]), "%s", distractors[k++ % 3]);
++    }
++    vu.answered = false;
++    vu.answer_ok = false;
++}
++
+ static bool vocab_load_next(void) {
+-    if (vocab_next(&vocab_ui.card, &vocab_ui.stage)) {
+-        vocab_ui.revealed = false;
+-        vocab_ui.finished = false;
+-        vocab_ui.audio_ok = vocab_audio_path(vocab_ui.card.id, vocab_ui.audio, sizeof(vocab_ui.audio));
+-        if (vocab_ui.config.auto_audio && vocab_ui.audio_ok)
+-            thingsos_audio_play(vocab_ui.audio, 0);
+-        return true;
++    vu.revealed = false;
++    vu.answered = false;
++    if (!vocab_next(&vu.card, &vu.stage)) {
++        vu.screen = VOCAB_SCREEN_DONE;
++        return false;
+     }
+-    vocab_ui.finished = true;
+-    return false;
++    if (vu.stage == VOCAB_STAGE_QUIZ) vocab_build_quiz();
++    char audio[256];
++    if (vu.config.auto_audio && vocab_audio_path(vu.card.id, audio, sizeof(audio)))
++        thingsos_audio_play(audio, 0);
++    app.force_refresh = true;
++    return true;
+ }
+ 
+ static bool vocab_start(void) {
+-    if (vocab_ui.started) return true;
++    if (vu.started) return true;
+     uint32_t now = vocab_now_min();
+-    vocab_config_load("/sdcard", &vocab_ui.config);
++    vocab_config_load("/sdcard", &vu.config);
+     if (!vocab_open("/sdcard", now)) {
+-        vocab_ui.failed = true;
+-        vocab_ui.started = true;
++        vu.failed = true;
++        vu.started = true;
+         return false;
+     }
+-    vocab_begin_day(now, &vocab_ui.config);
+-    vocab_ui.opened_min = now;
+-    vocab_ui.started = true;
+-    vocab_ui.failed = false;
+-    vocab_stats(now, &vocab_ui.stats);
+-    vocab_load_next();
++    vu.started = true;
++    vu.failed = false;
++    vu.screen = VOCAB_SCREEN_HOME;
++    vocab_stats(now, &vu.stats);
+     return true;
+ }
+ 
+ static void vocab_stop(void) {
+-    if (!vocab_ui.started) return;
++    if (!vu.started) return;
+     thingsos_audio_stop();
+     vocab_close(vocab_now_min());
+-    vocab_ui.started = false;
+-    vocab_ui.ready = false;
++    vu.started = false;
++    vu.failed = false;
+ }
+ 
+-static void vocab_button(int x, int y, int w, int h, const char* text, bool strong) {
+-    app_outline(x, y, w, h);
+-    if (strong) thingsos_rect(&app.canvas, x + 3, y + 3, w - 6, h - 6, 0);
+-    int baseline = y + h / 2 + 12;
+-    if (strong) {
+-        thingsos_font_size(&app.font, 30);
+-        thingsos_label_right(&app.font, &app.canvas, text, x + 12, baseline, w - 24);
++static void vocab_start_session(bool learn) {
++    uint32_t now = vocab_now_min();
++    vu.booster = false;
++    vu.screen = learn ? VOCAB_SCREEN_LEARN : VOCAB_SCREEN_REVIEW;
++    vocab_begin_session(now, &vu.config, learn ? 1 : 2);
++    vocab_stats(now, &vu.stats);
++    vu.learned_before = vocab_learned_count();
++    if (!vocab_load_next()) app.force_refresh = true;
++}
++
++static void vocab_start_booster(void) {
++    uint32_t now = vocab_now_min();
++    vu.booster = true;
++    vu.screen = VOCAB_SCREEN_LEARN;
++    vocab_begin_session(now, &vu.config, 3);
++    vocab_stats(now, &vu.stats);
++    vu.learned_before = vocab_learned_count();
++    if (!vocab_load_next()) {
++        vu.screen = VOCAB_SCREEN_REVIEW;
++        vocab_begin_session(now, &vu.config, 2);
++        vocab_load_next();
++    }
++}
++
++static void vocab_after_answer(vocab_grade_t grade) {
++    uint32_t now = vocab_now_min();
++    const uint32_t learned_before = vocab_learned_count();
++    if (!vocab_answer(now, grade)) return;
++    const bool graduated = vocab_learned_count() > learned_before;
++    vocab_stats(now, &vu.stats);
++
++    if (vu.screen == VOCAB_SCREEN_REVIEW) {
++        if (grade == VOCAB_AGAIN || grade == VOCAB_HARD) {
++            vocab_start_booster();
++            return;
++        }
++        vocab_load_next();
++        return;
++    }
++    /* Learning ladder. */
++    if (graduated && vu.booster) {
++        vu.booster = false;
++        vu.screen = VOCAB_SCREEN_REVIEW;
++        vocab_begin_session(now, &vu.config, 2);
++        vocab_stats(now, &vu.stats);
++        vocab_load_next();
++        return;
++    }
++    if (graduated) {
++        vocab_load_next();
++        return;
++    }
++    vocab_load_next();
++}
++
++static void vocab_draw_home(void) {
++    header("背单词");
++    char line[128];
++    snprintf(line, sizeof(line), "连续 %u 天 · 今日新词 %u · 今日复习 %u",
++             (unsigned)vu.stats.streak, (unsigned)vu.stats.new_today,
++             (unsigned)vu.stats.reviews_today);
++    label(line, 36, 210, 24, 612);
++
++    const uint32_t total = vocab_count();
++    const uint32_t learned = vocab_learned_count();
++    const uint32_t fresh = vocab_new_count();
++    thingsos_rect(&app.canvas, 36, 262, 612, 1, 0);
++    label("学习进度", 36, 320, 28, 300);
++    snprintf(line, sizeof(line), "%u / %u", (unsigned)learned, (unsigned)total);
++    thingsos_font_size(&app.font, 26);
++    thingsos_label_right(&app.font, &app.canvas, line, 36, 320, 612);
++    vocab_bar(342, learned, total);
++    snprintf(line, sizeof(line), "待学 %u · 已完成 %u%%", (unsigned)fresh,
++             total ? (unsigned)((uint64_t)learned * 100 / total) : 0u);
++    label(line, 36, 390, 22, 612);
++
++    label("复习进度", 36, 470, 28, 300);
++    snprintf(line, sizeof(line), "%u / %u", (unsigned)vu.stats.reviews_today,
++             (unsigned)vu.stats.due_today);
++    thingsos_font_size(&app.font, 26);
++    thingsos_label_right(&app.font, &app.canvas, line, 36, 470, 612);
++    vocab_bar(492, vu.stats.reviews_today, vu.stats.due_today);
++    snprintf(line, sizeof(line), "到期 %u 词", (unsigned)vu.stats.due_today);
++    label(line, 36, 540, 22, 612);
++
++    vocab_button(36, 640, 612, 120, "开 始 学 习");
++    vocab_button(36, 800, 612, 120, "开 始 复 习");
++    label("学习：4 选 1 → 看例句回忆 → 只看单词回忆", 36, 980, 20, 612);
++    label("复习：认识 / 模糊 / 不认识，模糊与不认识会回到学习三关", 36, 1015, 20, 612);
++    nav();
++}
++
++static void vocab_draw_quiz(void) {
++    thingsos_rect(&app.canvas, 36, 236, 612, 1, 0);
++    label(vu.card.word, 36, 320, 56, 612);
++    if (vu.card.phonetic[0]) label(vu.card.phonetic, 36, 364, 24, 612);
++    label("选出正确的中文释义", 36, 424, 24, 612);
++
++    for (unsigned i = 0; i < vu.option_count; i++) {
++        const int y = 470 + (int)i * 126;
++        const bool marked = vu.answered && (uint8_t)i == vu.answer_at;
++        app_outline(36, y, 612, 106);
++        if (marked) app_outline(40, y + 4, 604, 98);
++        char number[8];
++        snprintf(number, sizeof(number), "%c", 'A' + (int)i);
++        label(number, 56, y + 62, 30, 60);
++        label(vu.options[i], 110, y + 62, 27, 520);
++    }
++    if (vu.answered) {
++        label(vu.answer_ok ? "答对了，进入下一关" : "再认一下：正确释义已标出", 36, 1030, 24, 612);
++        vocab_button(36, 1060, 612, 80, "继 续");
++    }
++    nav();
++}
++
++static void vocab_draw_card(void) {
++    label(vu.screen == VOCAB_SCREEN_REVIEW ? "复习" : "学习", 36, 210, 24, 612);
++    char line[128];
++    snprintf(line, sizeof(line), "今日 %u · 待复习 %u · 连续 %u 天",
++             (unsigned)vu.stats.new_today, (unsigned)vu.stats.due_today,
++             (unsigned)vu.stats.streak);
++    thingsos_font_size(&app.font, 22);
++    thingsos_label_right(&app.font, &app.canvas, line, 36, 210, 612);
++    thingsos_rect(&app.canvas, 36, 236, 612, 1, 0);
++
++    label(vu.card.word, 36, 340, 60, 612);
++    if (vu.card.phonetic[0]) label(vu.card.phonetic, 36, 390, 24, 612);
++
++    if (vu.stage == VOCAB_STAGE_RECALL && vu.card.example_en[0]) {
++        label(vu.card.example_en, 36, 450, 26, 612);
++        if (vu.card.example_zh[0]) label(vu.card.example_zh, 36, 494, 24, 612);
++    }
++
++    if (vu.revealed) {
++        thingsos_rect(&app.canvas, 36, 540, 612, 1, 0);
++        label(vu.card.meaning, 36, 620, 44, 612);
++        if (vu.stage != VOCAB_STAGE_RECALL && vu.card.example_en[0])
++            label(vu.card.example_en, 36, 700, 24, 612);
++        if (vu.card.root[0]) {
++            char root_line[128];
++            snprintf(root_line, sizeof(root_line), "词根：%s", vu.card.root);
++            label(root_line, 36, 760, 20, 612);
++        }
++        vocab_button(36, 980, 190, 96, "不认识");
++        vocab_button(247, 980, 190, 96, "模糊");
++        vocab_button(458, 980, 190, 96, "认识");
+     } else {
+-        centered_label(text, x, baseline, 30, w);
++        centered_label(vu.stage == VOCAB_STAGE_RECALL ? "回想它的中文意思，再点按核对"
++                                                      : "只想这个单词的意思，再点按核对",
++                       36, 640, 28, 612);
++        vocab_button(36, 980, 612, 96, "显示释义");
+     }
++    nav();
++}
++
++static void vocab_draw_done(void) {
++    header("背单词");
++    label(vu.screen == VOCAB_SCREEN_DONE ? "今日完成" : "", 36, 300, 40, 612);
++    char line[96];
++    snprintf(line, sizeof(line), "新词 %u · 复习 %u", (unsigned)vu.stats.new_today,
++             (unsigned)vu.stats.reviews_today);
++    label(line, 36, 380, 28, 612);
++    snprintf(line, sizeof(line), "连续 %u 天 · 已学 %u / %u", (unsigned)vu.stats.streak,
++             (unsigned)vocab_learned_count(), (unsigned)vocab_count());
++    label(line, 36, 430, 26, 612);
++    vocab_button(36, 560, 612, 110, "返回主页");
++    vocab_button(36, 700, 612, 110, "返回应用");
++    nav();
+ }
+ 
+ static bool vocab_draw(void) {
+     if (app.page != THINGSOS_UI_VOCAB) {
+-        if (vocab_ui.started) vocab_stop();
++        if (vu.started) vocab_stop();
+         return false;
+     }
+     if (!vocab_start()) {
+         header("背单词");
+-        label("词库未就绪", 36, 420, 34, 612);
+-        label("请用 vocab_pack.py 生成词库并拷到 SD 卡", 36, 480, 24, 612);
+-        label("/sdcard/.thingsos/vocab/", 36, 530, 24, 612);
+-        nav();
+-        return true;
+-    }
+-    if (vocab_ui.finished) {
+-        vocab_stats(vocab_now_min(), &vocab_ui.stats);
+-        header("背单词");
+-        label("今日完成", 36, 360, 40, 612);
++        label("词库未就绪", 36, 400, 34, 612);
++        label("请把 bank.bin 放进 /sdcard/.thingsos/vocab/", 36, 450, 24, 612);
++        label("用 vocab-kit/tools/vocab_pack.py 生成", 36, 494, 24, 612);
+         char line[96];
+-        snprintf(line, sizeof(line), "新词 %u · 复习 %u", (unsigned)vocab_ui.stats.new_today,
+-                 (unsigned)vocab_ui.stats.reviews_today);
+-        label(line, 36, 430, 28, 612);
+-        snprintf(line, sizeof(line), "连续 %u 天 · 待复习 %u", (unsigned)vocab_ui.stats.streak,
+-                 (unsigned)vocab_ui.stats.due_today);
+-        label(line, 36, 480, 28, 612);
+-        vocab_button(36, 640, 612, 96, "返回应用", false);
++        snprintf(line, sizeof(line), "SD 卡: %s", media() ? "已挂载" : "未挂载");
++        label(line, 36, 540, 24, 612);
++        label("或按 HOME 键返回应用页", 36, 600, 22, 612);
++        vocab_button(36, 640, 612, 96, "返回应用");
+         nav();
+-        vocab_ui.ready = true;
+         return true;
+     }
+ 
+-    header("背单词");
+-    char line[128];
+-    const unsigned learned = (unsigned)vocab_ui.stats.new_today;
+-    snprintf(line, sizeof(line), "今日 %u · 待复习 %u · 连续 %u 天", learned,
+-             (unsigned)vocab_ui.stats.due_today, (unsigned)vocab_ui.stats.streak);
+-    label(line, 36, 214, 24, 612);
+-    thingsos_rect(&app.canvas, 36, 240, 612, 1, 0);
+-
+-    /* Card */
+-    thingsos_font_size(&app.font, 52);
+-    app.font.dither = true;
+-    thingsos_label_right(&app.font, &app.canvas, vocab_ui.card.word, 36, 430, 612);
+-    if (vocab_ui.card.phonetic[0]) centered_label(vocab_ui.card.phonetic, 36, 480, 26, 612);
+-
+-    if (vocab_ui.revealed) {
+-        thingsos_rect(&app.canvas, 36, 520, 612, 1, 0);
+-        label(vocab_ui.card.meaning, 36, 580, 32, 612);
+-        if (vocab_ui.card.example_en[0]) label(vocab_ui.card.example_en, 36, 660, 24, 612);
+-        if (vocab_ui.card.example_zh[0]) label(vocab_ui.card.example_zh, 36, 700, 24, 612);
+-        if (vocab_ui.card.root[0]) label(vocab_ui.card.root, 36, 780, 22, 612);
+-        vocab_button(36, 860, 148, 96, "不认识", false);
+-        vocab_button(192, 860, 148, 96, "模糊", false);
+-        vocab_button(348, 860, 148, 96, "认识", true);
+-        vocab_button(504, 860, 144, 96, "秒答", false);
+-    } else {
+-        centered_label(vocab_ui.stage == VOCAB_STAGE_AUDIO ? "听发音，回想释义" : "想一想，再点按看释义",
+-                       36, 700, 26, 612);
+-        vocab_button(36, 860, 612, 96, "显示释义", false);
++    switch (vu.screen) {
++        case VOCAB_SCREEN_HOME: vocab_draw_home(); break;
++        case VOCAB_SCREEN_LEARN:
++        case VOCAB_SCREEN_REVIEW:
++            if (vu.stage == VOCAB_STAGE_QUIZ) vocab_draw_quiz();
++            else vocab_draw_card();
++            break;
++        default: vocab_draw_done(); break;
+     }
+-    if (!vocab_ui.audio_ok) label("无发音", 36, 820, 20, 200);
+-    nav();
+-    vocab_ui.ready = true;
+-    return true;
+-}
+-
+-static bool vocab_answer_grade(vocab_grade_t grade) {
+-    uint32_t now = vocab_now_min();
+-    if (!vocab_answer(now, grade)) return false;
+-    vocab_stats(now, &vocab_ui.stats);
+-    vocab_load_next();
+-    app.dirty = true;
+     return true;
+ }
+ 
+ static bool vocab_tap(int x, int y) {
+     if (app.page != THINGSOS_UI_VOCAB) return false;
+-    if (vocab_ui.failed) {
+-        if (y >= 640 && y < 740) {
+-            app_enter(THINGSOS_UI_APPS);
+-            return true;
+-        }
++    if (y >= 1098) return false; /* bottom navigation stays with the shell */
++    if (vu.failed) {
++        if (y >= 640 && y < 760) app_enter(THINGSOS_UI_APPS);
+         return true;
+     }
+-    if (vocab_ui.finished) {
+-        if (y >= 640) app_enter(THINGSOS_UI_APPS);
++
++    if (vu.screen == VOCAB_SCREEN_HOME) {
++        if (y >= 640 && y < 760) { vocab_start_session(true); return true; }
++        if (y >= 800 && y < 920) { vocab_start_session(false); return true; }
+         return true;
+     }
+-    if (!vocab_ui.revealed) {
+-        vocab_ui.revealed = true;
+-        vocab_reveal();
+-        if (vocab_ui.audio_ok) thingsos_audio_play(vocab_ui.audio, 0);
+-        app.dirty = true;
++
++    if (vu.screen == VOCAB_SCREEN_DONE) {
++        if (y >= 560 && y < 670) { vu.screen = VOCAB_SCREEN_HOME; app.dirty = true; return true; }
++        if (y >= 700 && y < 810) { app_enter(THINGSOS_UI_APPS); return true; }
+         return true;
+     }
+-    if (y >= 860 && y < 960) {
+-        if (x >= 504) return vocab_answer_grade(VOCAB_EASY);
+-        if (x >= 348) return vocab_answer_grade(VOCAB_GOOD);
+-        if (x >= 192) return vocab_answer_grade(VOCAB_HARD);
+-        if (x >= 36) return vocab_answer_grade(VOCAB_AGAIN);
++
++    if (vu.stage == VOCAB_STAGE_QUIZ) {
++        if (vu.answered) {
++            if (y >= 1060) {
++                vocab_after_answer(vu.answer_ok ? VOCAB_GOOD : VOCAB_AGAIN);
++            }
++            return true;
++        }
++        if (y >= 470 && y < 470 + 4 * 126) {
++            const int index = (y - 470) / 126;
++            if (index < (int)vu.option_count) {
++                vu.answered = true;
++                vu.answer_ok = (uint8_t)index == vu.answer_at;
++                app.force_refresh = true;
++            }
++        }
++        return true;
+     }
+-    if (x >= 480 && y >= 760 && y < 850 && vocab_ui.audio_ok) {
+-        thingsos_audio_play(vocab_ui.audio, 0);
++
++    if (!vu.revealed) {
++        vu.revealed = true;
++        vocab_reveal();
++        char audio[256];
++        if (vocab_audio_path(vu.card.id, audio, sizeof(audio)))
++            thingsos_audio_play(audio, 0);
++        app.dirty = true;
++        app.force_refresh = true;
+         return true;
+     }
++
++    if (y >= 980 && y < 1076) {
++        if (x >= 458) { vocab_after_answer(VOCAB_GOOD); return true; }
++        if (x >= 247) { vocab_after_answer(VOCAB_HARD); return true; }
++        if (x >= 36) { vocab_after_answer(VOCAB_AGAIN); return true; }
++    }
+     return true;
+ }
+ 
+@@ -188,35 +375,48 @@ static bool vocab_key(int action) {
+         app_enter(THINGSOS_UI_APPS);
+         return true;
+     }
+-    if (vocab_ui.failed || vocab_ui.finished) return true;
+-    if (action == THINGSOS_KEY_MENU) {
+-        if (!vocab_ui.revealed) {
+-            vocab_ui.revealed = true;
+-            vocab_reveal();
+-            if (vocab_ui.audio_ok) thingsos_audio_play(vocab_ui.audio, 0);
+-        } else if (vocab_ui.audio_ok) {
+-            thingsos_audio_play(vocab_ui.audio, 0);
+-        }
+-        app.dirty = true;
++    if (vu.failed) return false;
++    if (vu.screen == VOCAB_SCREEN_HOME) {
++        if (action == THINGSOS_KEY_NEXT) vocab_start_session(true);
++        else if (action == THINGSOS_KEY_PREVIOUS) vocab_start_session(false);
+         return true;
+     }
+-    if (action == THINGSOS_KEY_NEXT) {
+-        if (!vocab_ui.revealed) {
+-            vocab_ui.revealed = true;
+-            vocab_reveal();
++    if (vu.screen == VOCAB_SCREEN_DONE) {
++        if (action == THINGSOS_KEY_NEXT || action == THINGSOS_KEY_PREVIOUS) {
++            vu.screen = VOCAB_SCREEN_HOME;
+             app.dirty = true;
++        }
++        return true;
++    }
++    if (vu.stage == VOCAB_STAGE_QUIZ) {
++        if (vu.answered) {
++            if (action == THINGSOS_KEY_NEXT || action == THINGSOS_KEY_MENU)
++                vocab_after_answer(vu.answer_ok ? VOCAB_GOOD : VOCAB_AGAIN);
+             return true;
+         }
+-        return vocab_answer_grade(VOCAB_GOOD);
++        return true;
+     }
+-    if (action == THINGSOS_KEY_PREVIOUS) {
+-        if (!vocab_ui.revealed) {
+-            vocab_ui.revealed = true;
++    if (action == THINGSOS_KEY_MENU) {
++        if (!vu.revealed) {
++            vu.revealed = true;
+             vocab_reveal();
+-            app.dirty = true;
+-            return true;
++            app.dirty = app.force_refresh = true;
+         }
+-        return vocab_answer_grade(VOCAB_AGAIN);
++        return true;
++    }
++    if (!vu.revealed) {
++        vu.revealed = true;
++        vocab_reveal();
++        app.dirty = app.force_refresh = true;
++        return true;
++    }
++    if (action == THINGSOS_KEY_NEXT) {
++        vocab_after_answer(VOCAB_GOOD);
++        return true;
++    }
++    if (action == THINGSOS_KEY_PREVIOUS) {
++        vocab_after_answer(VOCAB_AGAIN);
++        return true;
+     }
+     return true;
+ }
+diff --git a/native/include/thingsos/vocab.h b/native/include/thingsos/vocab.h
+index 2a6267b..927f9c6 100644
+--- a/native/include/thingsos/vocab.h
++++ b/native/include/thingsos/vocab.h
+@@ -17,6 +17,7 @@
+ #define VOCAB_EXAMPLE_BYTES 384
+ #define VOCAB_ROOT_BYTES 96
+ #define VOCAB_GROUP_BYTES 24
++#define VOCAB_POS_BYTES 12
+ 
+ #define VOCAB_MAX_CARDS 100000u
+ #define VOCAB_MINUTE_PER_DAY 1440u
+@@ -45,6 +46,7 @@ typedef enum {
+     VOCAB_STAGE_WORD = 0,   /* word -> meaning */
+     VOCAB_STAGE_RECALL = 1, /* word -> recall meaning */
+     VOCAB_STAGE_AUDIO = 2,  /* listen -> meaning */
++    VOCAB_STAGE_QUIZ = 3,   /* four meanings, pick the right one */
+ } vocab_card_stage_t;
+ 
+ typedef struct {
+@@ -56,6 +58,7 @@ typedef struct {
+     char example_zh[VOCAB_EXAMPLE_BYTES];
+     char root[VOCAB_ROOT_BYTES];
+     char group[VOCAB_GROUP_BYTES];
++    char pos[VOCAB_POS_BYTES];
+ } vocab_card_t;
+ 
+ typedef struct {
+@@ -97,12 +100,20 @@ uint32_t vocab_count(void);
+ 
+ /* Daily session. */
+ bool vocab_begin_day(uint32_t now_min, const vocab_config_t *cfg);
++/* focus: 0 mixed, 1 learning ladder (new/learning/relearning), 2 due reviews,
++ * 3 relearning booster only. */
++bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus);
+ bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage);
+ bool vocab_answer(uint32_t now_min, vocab_grade_t grade);
+ bool vocab_undo(uint32_t now_min);
+ bool vocab_stats(uint32_t now_min, vocab_stats_t *out);
+ bool vocab_audio_path(uint32_t id, char *buf, size_t bytes);
+ uint32_t vocab_current_id(void);
++uint32_t vocab_learned_count(void);
++uint32_t vocab_new_count(void);
++uint8_t vocab_current_level(void);
++/* Three meaning strings that are plausibly confusable with `id`. */
++bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]);
+ vocab_card_stage_t vocab_current_stage(void);
+ bool vocab_current_revealed(void);
+ void vocab_reveal(void);
+diff --git a/native/src/vocab.c b/native/src/vocab.c
+index 79f8856..d14b6ba 100644
+--- a/native/src/vocab.c
++++ b/native/src/vocab.c
+@@ -22,7 +22,8 @@
+ #define VOCAB_BANK_MAGIC "VOCB"
+ #define VOCAB_CONFIG_MAGIC "VOCC"
+ #define VOCAB_VERSION 1u
+-#define VOCAB_INDEX_ENTRY 28u
++#define VOCAB_BANK_VERSION 3u
++#define VOCAB_INDEX_ENTRY 32u
+ #define VOCAB_JOURNAL_ENTRY 32u
+ #define VOCAB_CONFIG_BYTES 16u
+ #define VOCAB_UNDO_DEPTH 16u
+@@ -46,8 +47,9 @@ typedef struct {
+     uint32_t example_en_off;
+     uint32_t example_zh_off;
+     uint32_t root_off;
+-    uint16_t phonetic_off;
+-    uint16_t group_off;
++    uint32_t phonetic_off;
++    uint32_t group_off;
++    uint32_t pos_off;
+ } vocab_index_t;
+ 
+ typedef struct {
+@@ -241,8 +243,9 @@ static bool read_index(uint32_t id, vocab_index_t *index) {
+     memcpy(&index->example_en_off, raw + 8, 4);
+     memcpy(&index->example_zh_off, raw + 12, 4);
+     memcpy(&index->root_off, raw + 16, 4);
+-    memcpy(&index->phonetic_off, raw + 20, 2);
+-    memcpy(&index->group_off, raw + 22, 2);
++    memcpy(&index->phonetic_off, raw + 20, 4);
++    memcpy(&index->group_off, raw + 24, 4);
++    memcpy(&index->pos_off, raw + 28, 4);
+     return true;
+ }
+ 
+@@ -257,7 +260,7 @@ static bool bank_open(void) {
+     uint16_t version = 0, count = 0;
+     memcpy(&version, head + 4, 2);
+     memcpy(&count, head + 6, 2);
+-    if (version != VOCAB_VERSION || count == 0 || count > 20000u) return false;
++    if (version != VOCAB_BANK_VERSION || count == 0 || count > 20000u) return false;
+     memcpy(&g_bank.index_off, head + 8, 4);
+     memcpy(&g_bank.strings_off, head + 12, 4);
+     memcpy(&g_bank.bank_hash, head + 16, 4);
+@@ -418,13 +421,26 @@ static void log_review(uint32_t id, int grade, uint32_t now_min,
+ 
+ /* -------------------------------------------------------------- scheduling */
+ 
+-static uint32_t graduate_days(const vocab_config_t *cfg, float stability) {
++/* flags bits 0-1: learning stage (0 quiz, 1 example, 2 bare word). */
++#define VOCAB_LEVEL_OF(record) ((record)->flags & 0x03u)
++
++static uint32_t review_days(const vocab_config_t *cfg, vocab_state_record_t *record,
++                            float stability, vocab_grade_t grade) {
++    if (cfg->mode == VOCAB_MODE_CLASSIC) {
++        static const uint16_t table[8] = {1, 1, 2, 4, 7, 15, 30, 60};
++        unsigned step = record->reps < 7 ? record->reps : 7;
++        if (grade == VOCAB_GOOD) step = step + 1 > 7 ? 7 : step + 1;
++        if (grade == VOCAB_EASY) step = step + 2 > 7 ? 7 : step + 2;
++        return table[step];
++    }
+     float days = vocab_fsrs_interval(stability, (float)cfg->target_percent / 100.0f);
+     if (days < 1.0f) days = 1.0f;
+     return (uint32_t)days;
+ }
+ 
+-static void schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
++/* One answer in either the learning ladder (level 0..2) or review.
++ * Returns true when the card graduated into review during this answer. */
++static bool schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
+                             uint32_t now_min, const vocab_config_t *cfg) {
+     const uint32_t day = now_min / VOCAB_MINUTE_PER_DAY;
+     uint32_t elapsed_min = record->last_min && now_min > record->last_min
+@@ -433,82 +449,79 @@ static void schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
+     uint16_t elapsed_days = (uint16_t)(elapsed_min / VOCAB_MINUTE_PER_DAY);
+     const bool same_day = record->last_min != 0 && elapsed_min > 0 &&
+                           elapsed_min < VOCAB_MINUTE_PER_DAY;
++    const bool learning = record->state == VOCAB_STATE_NEW ||
++                          record->state == VOCAB_STATE_LEARNING ||
++                          record->state == VOCAB_STATE_RELEARNING;
++    uint8_t level = VOCAB_LEVEL_OF(record);
+ 
+-    if (cfg->mode == VOCAB_MODE_CLASSIC) {
+-        static const uint16_t table[8] = {1, 1, 2, 4, 7, 15, 30, 60};
+-        unsigned step = record->reps;
+-        if (record->state == VOCAB_STATE_NEW) step = 0;
+-        uint32_t days;
++    vocab_fsrs_memory_t memory = {record->stability, record->difficulty};
++
++    if (learning) {
+         if (grade == VOCAB_AGAIN) {
+-            step = 0;
+-            record->state = record->state == VOCAB_STATE_REVIEW ||
+-                                    record->state == VOCAB_STATE_RELEARNING
+-                                ? VOCAB_STATE_RELEARNING
+-                                : VOCAB_STATE_LEARNING;
+-            record->due_min = now_min + VOCAB_RELEARN_MIN;
++            level = 0;
++            record->state = record->state == VOCAB_STATE_NEW ? VOCAB_STATE_LEARNING
++                                                             : VOCAB_STATE_RELEARNING;
++            record->due_min = now_min + 1;
+             record->lapses++;
+-            days = 0;
++        } else if (grade == VOCAB_HARD) {
++            record->due_min = now_min + 5;
++            if (record->state == VOCAB_STATE_NEW) record->state = VOCAB_STATE_LEARNING;
+         } else {
+-            if (grade == VOCAB_HARD) {
+-                days = table[step < 8 ? step : 7] > 1 ? table[step < 8 ? step : 7] / 2 : 1;
+-            } else if (grade == VOCAB_GOOD) {
+-                step = step + 1 > 7 ? 7 : step + 1;
+-                days = table[step];
++            if (level < 2) {
++                level++;
++                record->due_min = now_min + 5;
++                if (record->state == VOCAB_STATE_NEW) record->state = VOCAB_STATE_LEARNING;
+             } else {
+-                step = step + 2 > 7 ? 7 : step + 2;
+-                days = table[step];
++                /* Graduation: one FSRS review with a passing grade. */
++                if (record->state == VOCAB_STATE_NEW) {
++                    vocab_fsrs_initial((int)VOCAB_GOOD, &memory);
++                } else {
++                    float elapsed = same_day ? 0.0f
++                                             : (elapsed_days ? (float)elapsed_days : 1.0f);
++                    vocab_fsrs_review(&memory, elapsed, (int)VOCAB_GOOD, same_day ? 1 : 0);
++                }
++                const uint32_t days = review_days(cfg, record, memory.stability, VOCAB_GOOD);
++                record->state = VOCAB_STATE_REVIEW;
++                record->due_min = now_min + days * VOCAB_MINUTE_PER_DAY;
++                record->flags = 0;
++                record->stability = memory.stability;
++                record->difficulty = memory.difficulty;
++                record->reps++;
++                record->last_min = now_min;
++                record->elapsed = elapsed_days;
++                return true;
+             }
+-            record->state = VOCAB_STATE_REVIEW;
+-            record->due_min = now_min + days * VOCAB_MINUTE_PER_DAY;
+         }
+-        record->reps = (uint16_t)step;
++        record->flags = (uint8_t)((record->flags & ~0x03u) | level);
+         record->last_min = now_min;
+         record->elapsed = elapsed_days;
+-        return;
++        (void)day;
++        return false;
+     }
+ 
+-    vocab_fsrs_memory_t memory = {record->stability, record->difficulty};
+-    if (record->state == VOCAB_STATE_NEW) {
+-        vocab_fsrs_initial((int)grade, &memory);
+-    } else {
++    /* Review: FSRS (or the classic table) decides the next interval. */
++    {
+         float elapsed = same_day ? 0.0f : (elapsed_days ? (float)elapsed_days : 1.0f);
+         vocab_fsrs_review(&memory, elapsed, (int)grade, same_day ? 1 : 0);
+-    }
+-
+-    const bool learning = record->state == VOCAB_STATE_NEW ||
+-                          record->state == VOCAB_STATE_LEARNING ||
+-                          record->state == VOCAB_STATE_RELEARNING;
+-    if (learning) {
+-        if (grade == VOCAB_AGAIN) {
+-            record->state = record->state == VOCAB_STATE_NEW ? VOCAB_STATE_LEARNING
+-                                                             : VOCAB_STATE_RELEARNING;
+-            record->due_min = now_min + VOCAB_LEARN_AGAIN_MIN;
+-            record->lapses++;
+-        } else if (grade == VOCAB_HARD) {
+-            record->due_min = now_min + VOCAB_LEARN_GOOD_MIN / 2;
+-            if (record->state == VOCAB_STATE_NEW) record->state = VOCAB_STATE_LEARNING;
+-        } else if (grade == VOCAB_GOOD && record->state == VOCAB_STATE_NEW) {
+-            record->state = VOCAB_STATE_LEARNING;
+-            record->due_min = now_min + VOCAB_LEARN_GOOD_MIN;
++        const uint32_t days = review_days(cfg, record, memory.stability, grade);
++        record->stability = memory.stability;
++        record->difficulty = memory.difficulty;
++        record->due_min = now_min + days * VOCAB_MINUTE_PER_DAY;
++        if (grade == VOCAB_AGAIN || grade == VOCAB_HARD) {
++            /* 模糊/不认识: strengthen with the 3-stage ladder right away. */
++            record->state = VOCAB_STATE_RELEARNING;
++            record->flags = 0;
++            record->lapses += grade == VOCAB_AGAIN ? 1 : 0;
++            record->due_min = now_min + 1;
+         } else {
+             record->state = VOCAB_STATE_REVIEW;
+-            record->due_min =
+-                now_min + graduate_days(cfg, memory.stability) * VOCAB_MINUTE_PER_DAY;
++            record->flags = 0;
+         }
+-    } else if (grade == VOCAB_AGAIN) {
+-        record->state = VOCAB_STATE_RELEARNING;
+-        record->lapses++;
+-        record->due_min = now_min + VOCAB_RELEARN_MIN;
+-    } else {
+-        record->due_min =
+-            now_min + graduate_days(cfg, memory.stability) * VOCAB_MINUTE_PER_DAY;
++        record->reps++;
++        record->last_min = now_min;
++        record->elapsed = elapsed_days;
+     }
+-
+-    record->stability = memory.stability;
+-    record->difficulty = memory.difficulty;
+-    record->reps++;
+-    record->last_min = now_min;
+-    record->elapsed = elapsed_days;
++    return false;
+ }
+ 
+ /* ------------------------------------------------------------------ queue */
+@@ -518,23 +531,38 @@ static void queue_push(uint32_t id) {
+     g_queue[g_queue_len++] = id;
+ }
+ 
+-static void queue_build(uint32_t now_min, const vocab_config_t *cfg) {
++static void queue_build(uint32_t now_min, const vocab_config_t *cfg, int focus) {
+     g_queue_len = 0;
+     g_queue_pos = 0;
+     if (!g_queue || !g_records) return;
+     uint32_t new_added = 0, due_added = 0;
++    if (focus != 1 && focus != 3) {
++        for (uint32_t i = 0; i < g_count; i++) {
++            vocab_state_record_t *record = &g_records[i];
++            if (record->state == VOCAB_STATE_REVIEW && record->due_min &&
++                record->due_min <= now_min) {
++                if (due_added < cfg->review_limit) {
++                    queue_push(i);
++                    due_added++;
++                }
++            }
++        }
++    }
++    if (focus == 2) return;
+     for (uint32_t i = 0; i < g_count; i++) {
+         vocab_state_record_t *record = &g_records[i];
+-        if (record->state != VOCAB_STATE_NEW && record->due_min && record->due_min <= now_min) {
++        if (record->state == VOCAB_STATE_LEARNING || record->state == VOCAB_STATE_RELEARNING) {
++            if (focus == 3 && record->state != VOCAB_STATE_RELEARNING) continue;
++            if (record->due_min && record->due_min > now_min) continue;
+             if (due_added < cfg->review_limit) {
+                 queue_push(i);
+                 due_added++;
+             }
+         }
+     }
++    if (focus == 3) return;
+     for (uint32_t i = 0; i < g_count && new_added < cfg->new_limit; i++) {
+         if (g_records[i].state == VOCAB_STATE_NEW) {
+-            /* Interleave new cards after the first few due cards. */
+             queue_push(i);
+             new_added++;
+         }
+@@ -608,7 +636,22 @@ bool vocab_begin_day(uint32_t now_min, const vocab_config_t *cfg) {
+         g_new_today = 0;
+         g_reviews_today = 0;
+     }
+-    queue_build(now_min, &g_config);
++    queue_build(now_min, &g_config, 0);
++    return true;
++}
++
++bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus) {
++    if (!g_open) return false;
++    if (cfg) g_config = *cfg;
++    g_now = now_min;
++    const uint32_t day = now_min / VOCAB_MINUTE_PER_DAY;
++    if (day != g_last_day) {
++        g_streak = (g_last_day && day == g_last_day + 1) ? (uint16_t)(g_streak + 1) : 1;
++        g_last_day = day;
++        g_new_today = 0;
++        g_reviews_today = 0;
++    }
++    queue_build(now_min, &g_config, focus);
+     return true;
+ }
+ 
+@@ -643,13 +686,16 @@ bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage) {
+         read_string(index.example_zh_off, out->example_zh, sizeof(out->example_zh));
+         read_string(index.root_off, out->root, sizeof(out->root));
+         read_string(index.group_off, out->group, sizeof(out->group));
+-
+-        if (record->state == VOCAB_STATE_NEW) {
+-            g_stage = VOCAB_STAGE_WORD;
+-        } else if (record->state == VOCAB_STATE_REVIEW && (record->reps % 3u) == 1u) {
+-            g_stage = VOCAB_STAGE_AUDIO;
++        read_string(index.pos_off, out->pos, sizeof(out->pos));
++
++        if (record->state == VOCAB_STATE_NEW || record->state == VOCAB_STATE_LEARNING ||
++            record->state == VOCAB_STATE_RELEARNING) {
++            const uint8_t level = record->flags & 0x03u;
++            g_stage = level == 0 ? VOCAB_STAGE_QUIZ
++                      : level == 1 ? VOCAB_STAGE_RECALL
++                                   : VOCAB_STAGE_WORD;
+         } else {
+-            g_stage = VOCAB_STAGE_RECALL;
++            g_stage = VOCAB_STAGE_WORD; /* review always asks for the bare word */
+         }
+         if (stage) *stage = g_stage;
+         return true;
+@@ -739,6 +785,68 @@ bool vocab_audio_path(uint32_t id, char *buf, size_t bytes) {
+ }
+ 
+ uint32_t vocab_current_id(void) { return g_current_valid ? g_current : 0xFFFFFFFFu; }
++
++uint32_t vocab_new_count(void) {
++    uint32_t fresh = 0;
++    for (uint32_t i = 0; i < g_count; i++)
++        if (g_records[i].state == VOCAB_STATE_NEW) fresh++;
++    return fresh;
++}
++
++uint32_t vocab_learned_count(void) {
++    uint32_t learned = 0;
++    for (uint32_t i = 0; i < g_count; i++)
++        if (g_records[i].state == VOCAB_STATE_REVIEW) learned++;
++    return learned;
++}
++
++uint8_t vocab_current_level(void) {
++    return g_current_valid ? (uint8_t)(g_records[g_current].flags & 0x03u) : 0;
++}
++
++/* Deterministic distractors: same-ish meaning length, different first glyph. */
++bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]) {
++    if (!out || !g_count || id >= g_count) return false;
++    vocab_index_t self;
++    if (!read_index(id, &self)) return false;
++    char target[VOCAB_MEANING_BYTES];
++    read_string(self.meaning_off, target, sizeof(target));
++    const size_t want = strlen(target);
++    unsigned found = 0;
++    for (uint32_t step = 1; step < g_count && found < 3; step++) {
++        const uint32_t candidate = (id + step * 7u) % g_count;
++        if (candidate == id) continue;
++        vocab_index_t other;
++        if (!read_index(candidate, &other)) continue;
++        char meaning[VOCAB_MEANING_BYTES];
++        read_string(other.meaning_off, meaning, sizeof(meaning));
++        const size_t have = strlen(meaning);
++        if (have == 0 || (target[0] && meaning[0] == target[0])) continue;
++        if (have + 4 < want || have > want + 8) continue;
++        bool dup = false;
++        for (unsigned k = 0; k < found; k++)
++            if (!strcmp(out[k], meaning)) dup = true;
++        if (dup) continue;
++        snprintf(out[found], VOCAB_MEANING_BYTES, "%s", meaning);
++        found++;
++    }
++    for (uint32_t step = 1; step < g_count && found < 3; step++) {
++        const uint32_t candidate = (id + step * 13u) % g_count;
++        if (candidate == id) continue;
++        vocab_index_t other;
++        if (!read_index(candidate, &other)) continue;
++        char meaning[VOCAB_MEANING_BYTES];
++        read_string(other.meaning_off, meaning, sizeof(meaning));
++        if (!meaning[0]) continue;
++        bool dup = false;
++        for (unsigned k = 0; k < found; k++)
++            if (!strcmp(out[k], meaning)) dup = true;
++        if (dup) continue;
++        snprintf(out[found], VOCAB_MEANING_BYTES, "%s", meaning);
++        found++;
++    }
++    return found == 3;
++}
+ vocab_card_stage_t vocab_current_stage(void) { return g_stage; }
+ bool vocab_current_revealed(void) { return g_revealed; }
+ void vocab_reveal(void) { g_revealed = true; }
+diff --git a/native/tests/vocab_test.c b/native/tests/vocab_test.c
+index 656743c..afc77c2 100644
+--- a/native/tests/vocab_test.c
++++ b/native/tests/vocab_test.c
+@@ -47,7 +47,7 @@ static void write_bank(const char *dir, const bank_row_t *rows, size_t count) {
+     CHECK(f != NULL);
+ 
+     const uint32_t index_off = 32;
+-    const uint32_t strings_off = index_off + (uint32_t)(count * 28);
++    const uint32_t strings_off = index_off + (uint32_t)(count * 32);
+     unsigned char *strings = calloc(1, 1 << 16);
+     size_t at = 1; /* 0 is a valid "empty string" offset */
+     uint32_t offsets[16][7];
+@@ -66,7 +66,7 @@ static void write_bank(const char *dir, const bank_row_t *rows, size_t count) {
+ 
+     unsigned char head[32] = {0};
+     memcpy(head, "VOCB", 4);
+-    put16(head + 4, 1);
++    put16(head + 4, 3); /* bank format version */
+     put16(head + 6, (uint16_t)count);
+     put32(head + 8, index_off);
+     put32(head + 12, strings_off);
+@@ -75,14 +75,15 @@ static void write_bank(const char *dir, const bank_row_t *rows, size_t count) {
+     fwrite(head, 1, sizeof(head), f);
+ 
+     for (size_t i = 0; i < count && i < 16; i++) {
+-        unsigned char entry[28] = {0};
++        unsigned char entry[32] = {0};
+         put32(entry + 0, offsets[i][0]); /* word */
+         put32(entry + 4, offsets[i][2]); /* meaning */
+         put32(entry + 8, offsets[i][3]); /* example_en */
+         put32(entry + 12, offsets[i][4]); /* example_zh */
+         put32(entry + 16, offsets[i][5]); /* root */
+-        put16(entry + 20, (uint16_t)offsets[i][1]); /* phonetic */
+-        put16(entry + 22, (uint16_t)offsets[i][6]); /* group */
++        put32(entry + 20, offsets[i][1]); /* phonetic */
++        put32(entry + 24, offsets[i][6]); /* group */
++        put32(entry + 28, offsets[i][1]); /* pos: reuse phonetic string in the fixture */
+         fwrite(entry, 1, sizeof(entry), f);
+     }
+     fwrite(strings, 1, at, f);
+@@ -129,69 +130,85 @@ int main(void) {
+         {"apple", "/ˈæpl/", "苹果", "I ate an apple.", "我吃了个苹果。", "a-pple", "L1"},
+         {"abandon", "/əˈbændən/", "放弃", "He abandoned it.", "他放弃了。", "a-bandon", "L1"},
+         {"benefit", "/ˈbenɪfɪt/", "好处", "It is a benefit.", "这是个好处。", "bene", "L2"},
++        {"comfort", "/ˈkʌmfət/", "舒适", "A quiet comfort.", "一种安静的舒适。", "com-fort", "L2"},
++        {"deliver", "/dɪˈlɪvə/", "递送", "Deliver the parcel.", "递送包裹。", "de-liver", "L2"},
++        {"evident", "/ˈevɪdənt/", "明显的", "It is evident.", "这很明显。", "e-vid", "L3"},
+     };
+-    write_bank(root, rows, 3);
++    write_bank(root, rows, 6);
+ 
+     const uint32_t now = vocab_minutes_from_epoch(20261117, 8, 0);
+     vocab_config_t cfg;
+     vocab_config_defaults(&cfg);
+-    cfg.new_limit = 3;
++    cfg.new_limit = 6;
+     cfg.review_limit = 10;
+ 
+     CHECK(vocab_open(root, now));
+-    CHECK(vocab_count() == 3);
++    CHECK(vocab_count() == 6);
+     CHECK(vocab_begin_day(now, &cfg));
+ 
+     vocab_card_t card;
+     vocab_card_stage_t stage;
++    vocab_stats_t stats;
++
++    /* Stage 1: four-choice quiz on a brand new card. */
+     CHECK(vocab_next(&card, &stage));
+     CHECK(strcmp(card.word, "apple") == 0);
+     CHECK(strcmp(card.meaning, "苹果") == 0);
+-    CHECK(stage == VOCAB_STAGE_WORD);
++    CHECK(stage == VOCAB_STAGE_QUIZ);
+     const uint32_t first_id = card.id;
+-    CHECK(vocab_current_id() == first_id);
++    CHECK(vocab_current_level() == 0);
+     vocab_reveal();
+-    CHECK(vocab_current_revealed());
+ 
+-    /* Good on a new card: stays learning, due in 10 minutes. */
++    char distractors[3][VOCAB_MEANING_BYTES];
++    CHECK(vocab_distractors(first_id, distractors));
++    CHECK(distractors[0][0] != 0 && strcmp(distractors[0], "苹果") != 0);
++
+     CHECK(vocab_answer(now, VOCAB_GOOD));
+-    vocab_stats_t stats;
+     CHECK(vocab_stats(now, &stats));
+     CHECK(stats.new_today == 1);
+-    CHECK(stats.reviews_today == 1);
++    CHECK(vocab_learned_count() == 0); /* not graduated yet */
+ 
+-    /* Undo restores the card and counters. */
++    /* Undo restores the ladder and counters, then replay the answer. */
+     CHECK(vocab_undo(now));
+     CHECK(vocab_stats(now, &stats));
+     CHECK(stats.new_today == 0);
++    CHECK(vocab_current_level() == 0);
++    CHECK(vocab_answer(now, VOCAB_GOOD));
+ 
+-    /* Answer again and let it graduate with Easy. */
++    /* Next stage after the 5-minute step: word + example recall. */
++    uint32_t t = now + 6;
++    CHECK(vocab_begin_day(t, &cfg));
+     CHECK(vocab_next(&card, &stage));
+-    CHECK(vocab_answer(now, VOCAB_EASY));
++    CHECK(card.id == first_id);
++    CHECK(stage == VOCAB_STAGE_RECALL);
++    CHECK(vocab_current_level() == 1);
++    CHECK(vocab_answer(t, VOCAB_GOOD));
+ 
+-    /* Second card: Again -> learning with a short step. */
++    /* Final stage: bare word, graduating into review. */
++    t += 6;
++    CHECK(vocab_begin_day(t, &cfg));
+     CHECK(vocab_next(&card, &stage));
+-    const uint32_t second_id = card.id;
+-    CHECK(vocab_answer(now, VOCAB_AGAIN));
++    CHECK(stage == VOCAB_STAGE_WORD);
++    CHECK(vocab_answer(t, VOCAB_GOOD));
++    CHECK(vocab_learned_count() == 1);
+ 
+-    /* Third card: Hard -> stays learning. */
++    /* A second card answered Again restarts the ladder. */
+     CHECK(vocab_next(&card, &stage));
+-    CHECK(vocab_answer(now, VOCAB_HARD));
++    const uint32_t second_id = card.id;
++    CHECK(vocab_answer(t, VOCAB_AGAIN));
++    CHECK(vocab_current_level() == 0);
+ 
+-    /* Soon after, due-now cards should not be served before their step. */
+-    CHECK(!vocab_next(&card, &stage));
++    /* A third card answered Hard keeps its stage. */
++    CHECK(vocab_next(&card, &stage));
++    CHECK(vocab_answer(t, VOCAB_HARD));
+ 
+-    /* Persistence: reopen and check the counters survived via state+journal. */
+-    vocab_close(now);
+-    CHECK(vocab_open(root, now));
+-    CHECK(vocab_stats(now, &stats));
++    /* Persistence: reopen, the graduated card is still learned. */
++    vocab_close(t);
++    CHECK(vocab_open(root, t));
++    CHECK(vocab_learned_count() == 1);
++    CHECK(vocab_stats(t, &stats));
+     CHECK(stats.reviews_today >= 3);
+-
+-    /* Later the same day the learning steps become due again. */
+-    const uint32_t later = now + 11;
+-    CHECK(vocab_begin_day(later, &cfg));
+-    CHECK(vocab_next(&card, &stage));
+-    CHECK(card.id == second_id || card.id == first_id || card.id == 0xFFFFFFFFu);
++    (void)second_id;
+ 
+     /* Classic mode uses the fixed Ebbinghaus table. */
+     vocab_config_t classic = cfg;
+@@ -201,7 +218,7 @@ int main(void) {
+     CHECK(vocab_config_load(root, &loaded));
+     CHECK(loaded.mode == VOCAB_MODE_CLASSIC);
+ 
+-    vocab_close(later);
++    vocab_close(t);
+ 
+     /* Corrupt state must not crash: open falls back to a fresh session. */
+     snprintf(cmd, sizeof(cmd), "%s/.thingsos/vocab/state.dat", root);
+@@ -210,7 +227,7 @@ int main(void) {
+     fputs("broken", f);
+     fclose(f);
+     CHECK(vocab_open(root, now));
+-    CHECK(vocab_count() == 3);
++    CHECK(vocab_count() == 6);
+     vocab_close(now);
+ 
+     snprintf(cmd, sizeof(cmd), "rm -rf %s", root);
+diff --git a/vocab-kit/docs/VOCAB.md b/vocab-kit/docs/VOCAB.md
+index 319bd6a..9e75f9c 100644
+--- a/vocab-kit/docs/VOCAB.md
++++ b/vocab-kit/docs/VOCAB.md
+@@ -9,7 +9,7 @@
+ |---|---|
+ | 官方 0.2.0 主应用（macOS 构建基线） | 7,002,240 |
+ | 加入背单词后 | 7,014,320 |
+-| **新增** | **+12,064（约 11.8 KiB）** |
++| **新增** | **+16,240（约 15.9 KiB，含主页/三关/复习流程）** |
+ 
+ 上限 120 KiB（`scripts/check-size.sh`），当前余量充足；主应用分区 10.875 MiB。
+ 
+@@ -56,6 +56,18 @@ python3 vocab-kit/tools/vocab_pack.py \
+ 
+ 把 `build/my-bank/.thingsos/vocab/` 整个拷到 SD 卡的 `/sdcard/.thingsos/vocab/`。
+ 
++`bank.bin` 当前为 **v3**：32 字节索引（8×uint32：word/meaning/example_en/
++example_zh/root/phonetic/group/pos），固件只接受 v3，旧包会被拒绝。
++
++## 应用流程
++
++- **主页**：学习进度（已学/总数）与复习进度（今日已复习/到期），两个入口。
++- **学习**：每个新词三关 → ① 4 选 1 选释义 ② 词+英文例句回忆 ③ 只看单词回忆。
++  三关通过后进入复习队列；答错退回第一关。
++- **复习**：只出到期词，三档评分「认识 / 模糊 / 不认识」；选「模糊」或
++  「不认识」会自动进入该词的三关强化，通过后回到复习。
++- 调度仍是 FSRS-6；经典模式（固定艾宾浩斯表）在 config 里可切换。
++
+ 50 词测试包：
+ 
+ ```bash
+diff --git a/vocab-kit/tools/vocab_pack.py b/vocab-kit/tools/vocab_pack.py
+index 6582e7c..e1bd77c 100644
+--- a/vocab-kit/tools/vocab_pack.py
++++ b/vocab-kit/tools/vocab_pack.py
+@@ -27,7 +27,7 @@ import sys
+ import zlib
+ from pathlib import Path
+ 
+-VERSION = 1
++VERSION = 3  # bank format: 32-byte index entries, 8 x uint32 (incl. pos)
+ HEADER = 32
+ INDEX_ENTRY = 28
+ COLUMNS = ["word", "phonetic", "pos", "meaning", "example_en", "example_zh", "root", "group"]
+@@ -97,9 +97,9 @@ def build_bank(rows: list[dict[str, str]]) -> bytes:
+     index = bytearray()
+     for entry in offsets:
+         index += struct.pack(
+-            "<IIIIIHH",
++            "<IIIIIIII",
+             entry["word"], entry["meaning"], entry["example_en"], entry["example_zh"],
+-            entry["root"], entry["phonetic"], entry["group"],
++            entry["root"], entry["phonetic"], entry["group"], entry["pos"],
+         )
+ 
+     index_off = HEADER
+-- 
+2.50.1 (Apple Git-155)
+
