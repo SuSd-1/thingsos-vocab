@@ -209,7 +209,10 @@ int main(void) {
     CHECK(vocab_open(root, t));
     CHECK(vocab_learned_count() == 1);
     CHECK(vocab_stats(t, &stats));
-    CHECK(stats.reviews_today >= 3);
+    /* Learning answers are not reviews; the counter stays at zero until a
+       scheduled review card is graded. */
+    CHECK(stats.reviews_today == 0);
+    CHECK(stats.due_today <= stats.learned);
     (void)second_id;
 
     /* Classic mode uses the fixed Ebbinghaus table. */

@@ -24,6 +24,8 @@ typedef enum {
     VOCAB_PHASE_ANSWER,
 } vocab_phase_t;
 
+static uint8_t vu_chain_example;
+
 static struct {
     bool started, failed;
     vocab_screen_t screen;
@@ -55,10 +57,13 @@ static void vocab_button(int x, int y, int w, int h, const char* text) {
    readable ASCII instead of drawing empty boxes. */
 static const char* vocab_phonetic_text(char* out, size_t bytes, const char* in) {
     static const char* pairs[][2] = {
-        {"tʃ", "ch"}, {"dʒ", "j"},  {"ˈ", "'"}, {"ˌ", ","}, {"ː", ":"},
+        {"tʃ", "ch"}, {"dʒ", "j"},  {"ʧ", "ch"}, {"ʤ", "j"},  {"ˈ", "'"}, {"ˌ", ","},
+        {"ː", ":"},   {"ˑ", ":"},   {"̃", ""},   {"ʲ", "j"},   {"ʷ", "w"},
         {"ə", "e"},   {"ɪ", "i"},   {"ʊ", "u"}, {"ʃ", "sh"}, {"ʒ", "zh"},
         {"ŋ", "ng"},  {"θ", "th"},  {"ð", "dh"}, {"ɔ", "o"}, {"ɒ", "o"},
         {"ɑ", "a"},   {"ɜ", "er"},  {"ʌ", "u"}, {"æ", "a"}, {"ɡ", "g"},
+        {"ɛ", "e"},   {"ɐ", "a"},   {"ɹ", "r"}, {"ɾ", "t"}, {"ʔ", ""},
+        {"ɚ", "er"},  {"ɝ", "er"},  {"ʉ", "u"}, {"ɨ", "i"}, {"ɫ", "l"},
     };
     if (!out || bytes == 0) return in;
     size_t used = 0;
@@ -92,15 +97,20 @@ static void vocab_header(const char* title) {
 
 /* Circular "undo" arrow at the top-right, mirroring the back glyph at the left. */
 static void vocab_undo_icon(void) {
-    static const signed char arc[][2] = {
-        {14, 0}, {13, 6}, {10, 10}, {6, 13}, {0, 14}, {-6, 13},
-        {-10, 10}, {-13, 6}, {-14, 0}, {-13, -6}, {-10, -10}, {-6, -13},
+    static const signed char ring[12][2] = {
+        {11, 0}, {10, 6}, {6, 10}, {0, 11}, {-6, 10}, {-10, 6},
+        {-11, 0}, {-10, -6}, {-6, -10}, {0, -11}, {6, -10}, {10, -6},
     };
-    const int cx = 620, cy = 146;
-    for (unsigned i = 0; i < sizeof(arc) / sizeof(arc[0]); i++)
-        thingsos_rect(&app.canvas, cx + arc[i][0], cy + arc[i][1], 3, 3, 0);
-    toolbar_stroke(cx + 6, cy - 20, cx + 16, cy - 12);
-    toolbar_stroke(cx + 16, cy - 12, cx + 11, cy - 1);
+    const int cx = 620, cy = 148;
+    /* Arc from 90 degrees round to 0, leaving the top-right quadrant open. */
+    for (int i = 3; i <= 12; i++) {
+        const int a = i % 12;
+        toolbar_stroke(cx + ring[i - 1][0], cy + ring[i - 1][1],
+                       cx + ring[a][0], cy + ring[a][1]);
+    }
+    /* Arrowhead at the open end, pointing up along the tangent. */
+    toolbar_stroke(cx + 11, cy - 5, cx + 5, cy - 3);
+    toolbar_stroke(cx + 11, cy - 5, cx + 12, cy + 2);
 }
 
 
@@ -114,13 +124,105 @@ static void vocab_bar(int y, unsigned done, unsigned total) {
     }
 }
 
+static size_t vocab_utf8_width(const char* s) {
+    const unsigned char c = (unsigned char)*s;
+    if (c < 0x80) return 1;
+    if ((c & 0xF8) == 0xF0) return 4;
+    if ((c & 0xF0) == 0xE0) return 3;
+    return 2;
+}
+
+/* Up to two part-of-speech clauses, kept under 20 characters so the option
+   stays on one centred line. */
 static const char* vocab_short_meaning(char* out, size_t bytes, const char* in) {
     size_t used = 0;
-    while (*in && *in != ';' && strncmp(in, "ï¼", 3) != 0 && used + 1 < bytes && used < 24)
-        out[used++] = *in++;
-    if (*in && used + 1 < bytes) out[used++] = 0xE2, out[used++] = 0x80, out[used++] = 0xA6; /* … */
-    out[used < bytes ? used : bytes - 1] = 0;
+    int chars = 0;
+    while (*in && *in != '\n' && chars < 20) {
+        const size_t w = vocab_utf8_width(in);
+        const bool cut = *in == ';' || strncmp(in, "\xEF\xBC\x9B", 3) == 0;
+        if (cut) {
+            /* try the next part of speech if it still fits */
+            const char* next = in + (w == 1 ? 1 : 3);
+            while (*next == ' ') next++;
+            int extra = 0;
+            const char* probe = next;
+            while (*probe && *probe != '\n' && extra < 14) {
+                const size_t pw = vocab_utf8_width(probe);
+                probe += pw;
+                extra++;
+            }
+            if (*next && *next != '\n' && chars + 1 + extra <= 20) {
+                out[used++] = ' '; chars++;
+                while (*in && *in != '\n' && chars < 20) {
+                    const size_t w2 = vocab_utf8_width(in);
+                    if (used + w2 + 1 >= bytes) break;
+                    memcpy(out + used, in, w2);
+                    used += w2; in += w2; chars++;
+                }
+                continue;
+            }
+            break;
+        }
+        if (used + w + 1 >= bytes) break;
+        memcpy(out + used, in, w);
+        used += w; in += w; chars++;
+    }
+    out[used] = 0;
     return out;
+}
+
+/* Two balanced lines so an option fills its box instead of ending in dots. */
+static void vocab_draw_option_text(const char* text, int x, int y, int width) {
+    label(text, x, y + 60, 26, width);
+}
+
+static uint32_t vocab_next_cp(const char* s, unsigned* bytes) {
+    const unsigned char c = (unsigned char)s[0];
+    if (c < 0x80) { *bytes = 1; return c; }
+    if ((c & 0xE0) == 0xC0) { *bytes = 2; return ((uint32_t)(c & 0x1F) << 6) | (s[1] & 0x3F); }
+    if ((c & 0xF0) == 0xE0) {
+        *bytes = 3;
+        return ((uint32_t)(c & 0x0F) << 12) | ((uint32_t)(s[1] & 0x3F) << 6) | (s[2] & 0x3F);
+    }
+    *bytes = 4;
+    return ((uint32_t)(c & 0x07) << 18) | ((uint32_t)(s[1] & 0x3F) << 12) |
+           ((uint32_t)(s[2] & 0x3F) << 6) | (s[3] & 0x3F);
+}
+
+/* Wrap using the font's real advance widths: nothing overflows, so the renderer
+   never truncates the tail of a line, and words break at spaces when possible. */
+static int vocab_draw_wrapped(const char* text, int x, int y, int size, int max_lines) {
+    const int max_width = 612;
+    char line[VOCAB_EXAMPLE_BYTES * 2];
+    thingsos_font_size(&app.font, size);
+    size_t start = 0;
+    int lines = 0;
+    while (text[start] && lines < max_lines) {
+        size_t i = start, last_space = (size_t)-1;
+        int used = 0;
+        while (text[i]) {
+            unsigned bytes;
+            const uint32_t cp = vocab_next_cp(text + i, &bytes);
+            const int advance = thingsos_glyph(&app.font, NULL, cp, 0, 0);
+            if (used + advance > max_width) break;
+            used += advance;
+            if (cp == ' ') last_space = i;
+            i += bytes;
+        }
+        if (text[i] && last_space != (size_t)-1 && last_space > start) i = last_space;
+        size_t len = i - start;
+        while (len && text[start + len - 1] == ' ') len--;
+        if (len + 1 >= sizeof(line)) len = sizeof(line) - 2;
+        memcpy(line, text + start, len);
+        line[len] = 0;
+        if (line[0]) label(line, x, y + lines * (size + 8), size, 612);
+        lines++;
+        start = i;
+        while (text[start] == ' ') start++;
+        if (i == start && !text[i]) break;
+        if (!text[i]) break;
+    }
+    return lines;
 }
 
 static void vocab_build_quiz(void) {
@@ -157,17 +259,25 @@ static void vocab_play_word(void) {
     if (vocab_audio_path(vu.card.id, audio, sizeof(audio))) vocab_play_file(audio);
 }
 
-static void vocab_play_stage_audio(void) {
+/* Every screen speaks the word itself. The example sentence is only played
+   when the learner taps the example line. */
+static void vocab_play_stage_audio(void) { vocab_play_word(); }
+
+/* The audio service is single-channel: when the word finishes we start the
+   example sentence so the answer page reads "word, then sentence". */
+static void vocab_audio_tick(void) {
+    if (!vu_chain_example || app.page != THINGSOS_UI_VOCAB) return;
+    thingsos_audio_status_t status;
+    thingsos_audio_status(&status);
+    if (status.state != THINGSOS_AUDIO_IDLE && status.state != THINGSOS_AUDIO_ERROR) return;
+    vu_chain_example = 0;
     char example[256];
-    if (vu.stage == VOCAB_STAGE_RECALL && vu.card.example_en[0] &&
-        vocab_example_audio_path(vu.card.id, example, sizeof(example))) {
-        vocab_play_file(example);
-        return;
-    }
-    vocab_play_word();
+    if (vocab_example_audio_path(vu.card.id, example, sizeof(example)))
+        thingsos_audio_play(example, 0);
 }
 
 static bool vocab_load_next(void) {
+    vu_chain_example = 0;
     vu.revealed = false;
     vu.answered = false;
     vu.phase = VOCAB_PHASE_QUESTION;
@@ -199,6 +309,7 @@ static bool vocab_start(void) {
 }
 
 static void vocab_stop(void) {
+    vu_chain_example = 0;
     if (!vu.started) return;
     thingsos_audio_stop();
     vocab_close(vocab_now_min());
@@ -276,7 +387,24 @@ static void vocab_submit(vocab_grade_t grade) {
     }
     vu.phase = VOCAB_PHASE_ANSWER;
     vocab_play_stage_audio();
+    {
+        char example[256];
+        vu_chain_example = vocab_example_audio_path(vu.card.id, example, sizeof(example)) ? 1 : 0;
+    }
     app.dirty = true;
+}
+
+/* One part of speech per line, exactly as the book splits the gloss. */
+static void vocab_draw_meaning(const char* text, int y) {
+    char buf[VOCAB_MEANING_BYTES];
+    snprintf(buf, sizeof(buf), "%s", text);
+    char* line = buf;
+    for (int row = 0; line && *line && row < 3; row++) {
+        char* next = strchr(line, '\n');
+        if (next) *next = 0;
+        label(line, 36, y + row * 46, 32, 612);
+        line = next ? next + 1 : NULL;
+    }
 }
 
 static void vocab_draw_answer(void) {
@@ -284,16 +412,13 @@ static void vocab_draw_answer(void) {
     label(vu.card.word, 36, 258, 64, 612);
     if (vu.card.phonetic[0]) { char ipa[96]; label(vocab_phonetic_text(ipa, sizeof(ipa), vu.card.phonetic), 36, 308, 26, 612); }
     thingsos_rect(&app.canvas, 36, 330, 612, 1, 0);
-    if (vu.card.pos[0]) {
-        char head[VOCAB_MEANING_BYTES + 16];
-        snprintf(head, sizeof(head), "%s %s", vu.card.pos, vu.card.meaning);
-        label(head, 36, 396, 34, 612);
-    } else {
-        label(vu.card.meaning, 36, 396, 36, 612);
-    }
-    if (vu.card.example_en[0]) label(vu.card.example_en, 36, 496, 30, 612);
-    if (vu.card.example_zh[0]) label(vu.card.example_zh, 36, 546, 30, 612);
-    int section = 640;
+    vocab_draw_meaning(vu.card.meaning, 392);
+    /* Fixed bands: the example keeps its place whether the gloss is one line or three. */
+    thingsos_rect(&app.canvas, 36, 566, 612, 1, 90);
+    int example_lines = vu.card.example_en[0] ? vocab_draw_wrapped(vu.card.example_en, 36, 622, 32, 3) : 0;
+    if (vu.card.example_zh[0])
+        vocab_draw_wrapped(vu.card.example_zh, 36, 622 + example_lines * 40 + 6, 32, 3);
+    int section = 770;
     if (vu.card.root[0]) {
         char line[160];
         snprintf(line, sizeof(line), "词根：%s", vu.card.root);
@@ -337,11 +462,12 @@ static void vocab_draw_home(void) {
     label(line, 36, 366, 22, 612);
 
     label("复习进度", 36, 446, 28, 300);
-    snprintf(line, sizeof(line), "%u / %u", (unsigned)vu.stats.reviews_today,
-             (unsigned)vu.stats.due_today);
+    unsigned review_done = vu.stats.reviews_today;
+    if (review_done > vu.stats.due_today) review_done = vu.stats.due_today;
+    snprintf(line, sizeof(line), "%u / %u", review_done, (unsigned)vu.stats.due_today);
     thingsos_font_size(&app.font, 26);
     thingsos_label_right(&app.font, &app.canvas, line, 36, 446, 612);
-    vocab_bar(468, vu.stats.reviews_today, vu.stats.due_today);
+    vocab_bar(468, review_done, vu.stats.due_today);
     label("到期词会用「认识 / 模糊 / 忘记」复习", 36, 516, 22, 612);
 
     vocab_button(36, 640, 612, 120, "开 始 学 习");
@@ -361,8 +487,7 @@ static void vocab_draw_quiz(void) {
         if (marked) app_outline(40, y + 4, 604, 96);
         char number[4] = {'A' + (char)i, 0, 0, 0};
         label(number, 56, y + 60, 30, 50);
-        if (vu.card.pos[0]) label(vu.card.pos, 104, y + 60, 22, 80);
-        label(vu.options[i], 190, y + 60, 26, 430);
+        vocab_draw_option_text(vu.options[i], 104, y, 520);
     }
     if (!vu.answered) vocab_button(36, 1102, 612, 90, "看 答 案");
 }
@@ -370,10 +495,15 @@ static void vocab_draw_quiz(void) {
 static void vocab_draw_recall(void) {
     vocab_header(vu.screen == VOCAB_SCREEN_REVIEW ? "复习" : "学习");
     label(vu.card.word, 36, 258, 64, 612);
-    if (vu.card.phonetic[0]) { char ipa[96]; label(vocab_phonetic_text(ipa, sizeof(ipa), vu.card.phonetic), 36, 308, 26, 612); }
+    if (vu.card.phonetic[0]) {
+        char ipa[96];
+        label(vocab_phonetic_text(ipa, sizeof(ipa), vu.card.phonetic), 36, 308, 26, 612);
+    }
     thingsos_rect(&app.canvas, 36, 330, 612, 1, 0);
-    if (vu.stage == VOCAB_STAGE_RECALL && vu.card.example_en[0])
-        label(vu.card.example_en, 36, 400, 30, 612);
+    /* Middle band stays empty while recalling: the gloss appears only after the
+       grade, on the answer screen, so the bands never move. */
+    thingsos_rect(&app.canvas, 36, 566, 612, 1, 90);
+    if (vu.card.example_en[0]) vocab_draw_wrapped(vu.card.example_en, 36, 622, 32, 4);
     if (vu.stage == VOCAB_STAGE_RECALL) {
         vocab_button(36, 1102, 290, 90, "认识");
         vocab_button(358, 1102, 290, 90, "不认识");
@@ -442,9 +572,8 @@ static bool vocab_tap(int x, int y) {
     }
     (void)x;
     if (vu.failed) return true;
-    /* The shell navigation is hidden on this page: tapping the bottom strip
-       leaves the app, which is what the old "返回应用" row did. */
-    if (y >= 1200) { vocab_leave(); return true; }
+    /* No bottom-edge exit: the panel's last rows receive stray taps and an
+       implicit leave looked like a crash. Leaving is MENU / HOME / "<" only. */
 
     if (vu.screen == VOCAB_SCREEN_HOME) {
         if (y >= 640 && y < 760) { vocab_start_learn(); return true; }
@@ -461,16 +590,16 @@ static bool vocab_tap(int x, int y) {
         vocab_play_word();
         return true;
     }
-    if (y >= 380 && y < 560 && vu.card.example_en[0]) {
-        char example[256];
-        if (vocab_example_audio_path(vu.card.id, example, sizeof(example)))
-            vocab_play_file(example);
-        return true;
-    }
 
     if (vu.phase == VOCAB_PHASE_ANSWER) {
         if (x >= 580 && y >= 74 && y < 205) {
             vocab_do_undo();
+            return true;
+        }
+        if (y >= 600 && y < 780 && vu.card.example_en[0]) {
+            char example[256];
+            if (vocab_example_audio_path(vu.card.id, example, sizeof(example)))
+                vocab_play_file(example);
             return true;
         }
         if (y >= 1102 && y < 1196) {

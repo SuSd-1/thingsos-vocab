@@ -19,10 +19,16 @@
 #include <unistd.h>
 
 #ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #define VOCAB_LOG(...) ESP_LOGI("vocab", __VA_ARGS__)
+static void *vocab_alloc(size_t count, size_t size) {
+    void *mem = heap_caps_calloc(count, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    return mem ? mem : calloc(count, size);
+}
 #else
 #define VOCAB_LOG(...) ((void)0)
+static void *vocab_alloc(size_t count, size_t size) { return calloc(count, size); }
 #endif
 
 #define VOCAB_STATE_MAGIC "VOCS"
@@ -294,33 +300,33 @@ static bool bank_open(void) {
     memcpy(&stored, head + 28, 4);
     if (stored != crc32_bytes(head, 28)) return false;
     g_bank.count = count;
-    /* Load the whole index once (32 B per card): 5000 cards = 160 KB from PSRAM. */
-    g_index = calloc(count, sizeof(vocab_index_t));
+    /* Read the whole index once, in PSRAM (6588 cards = 264 KB). */
+    g_index = vocab_alloc(count, sizeof(vocab_index_t));
     if (g_index) {
-        for (uint32_t i = 0; i < count; i++) {
-            if (fseek(g_bank.file, (long)(g_bank.index_off + i * g_bank.entry_bytes), SEEK_SET) != 0) {
-                free(g_index);
-                g_index = NULL;
-                break;
+        const size_t raw_bytes = (size_t)count * g_bank.entry_bytes;
+        unsigned char *raw = vocab_alloc(1, raw_bytes);
+        if (!raw || fseek(g_bank.file, (long)g_bank.index_off, SEEK_SET) != 0 ||
+            fread(raw, 1, raw_bytes, g_bank.file) != raw_bytes) {
+            free(raw);
+            free(g_index);
+            g_index = NULL;
+        } else {
+            for (uint32_t i = 0; i < count; i++) {
+                const unsigned char *row = raw + (size_t)i * g_bank.entry_bytes;
+                memcpy(&g_index[i].word_off, row + 0, 4);
+                memcpy(&g_index[i].meaning_off, row + 4, 4);
+                memcpy(&g_index[i].example_en_off, row + 8, 4);
+                memcpy(&g_index[i].example_zh_off, row + 12, 4);
+                memcpy(&g_index[i].root_off, row + 16, 4);
+                memcpy(&g_index[i].phonetic_off, row + 20, 4);
+                memcpy(&g_index[i].group_off, row + 24, 4);
+                memcpy(&g_index[i].pos_off, row + 28, 4);
+                if (g_bank.entry_bytes >= 40) {
+                    memcpy(&g_index[i].derived_off, row + 32, 4);
+                    memcpy(&g_index[i].phrase_off, row + 36, 4);
+                }
             }
-            unsigned char raw[VOCAB_INDEX_ENTRY] = {0};
-            if (fread(raw, 1, g_bank.entry_bytes, g_bank.file) != g_bank.entry_bytes) {
-                free(g_index);
-                g_index = NULL;
-                break;
-            }
-            memcpy(&g_index[i].word_off, raw + 0, 4);
-            memcpy(&g_index[i].meaning_off, raw + 4, 4);
-            memcpy(&g_index[i].example_en_off, raw + 8, 4);
-            memcpy(&g_index[i].example_zh_off, raw + 12, 4);
-            memcpy(&g_index[i].root_off, raw + 16, 4);
-            memcpy(&g_index[i].phonetic_off, raw + 20, 4);
-            memcpy(&g_index[i].group_off, raw + 24, 4);
-            memcpy(&g_index[i].pos_off, raw + 28, 4);
-            if (g_bank.entry_bytes >= 40) {
-                memcpy(&g_index[i].derived_off, raw + 32, 4);
-                memcpy(&g_index[i].phrase_off, raw + 36, 4);
-            }
+            free(raw);
         }
     }
     return true;
@@ -345,7 +351,7 @@ static void record_default(vocab_state_record_t *record) {
 
 static bool state_load(void) {
     g_count = g_bank.count;
-    g_records = calloc(g_count, sizeof(vocab_state_record_t));
+    g_records = vocab_alloc(g_count, sizeof(vocab_state_record_t));
     if (!g_records) return false;
     for (uint32_t i = 0; i < g_count; i++) record_default(&g_records[i]);
 
@@ -376,7 +382,7 @@ static bool state_load(void) {
         return true;
     }
     size_t bytes = (size_t)g_count * sizeof(vocab_state_record_t);
-    vocab_state_record_t *tmp = malloc(bytes);
+    vocab_state_record_t *tmp = vocab_alloc(1, bytes);
     if (!tmp) {
         fclose(f);
         return false;
@@ -680,7 +686,7 @@ bool vocab_open(const char *root, uint32_t now_min) {
         return false;
     }
     journal_replay();
-    g_queue = calloc(g_count ? g_count : 1, sizeof(uint32_t));
+    g_queue = vocab_alloc(g_count ? g_count : 1, sizeof(uint32_t));
     vocab_config_load(g_root, &g_config);
     g_open = true;
     g_current_valid = false;
@@ -804,6 +810,7 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
     g_now = now_min;
     vocab_state_record_t *record = &g_records[g_current];
     const bool was_new = record->state == VOCAB_STATE_NEW;
+    const bool was_review = record->state == VOCAB_STATE_REVIEW || record->state == VOCAB_STATE_RELEARNING;
 
     vocab_undo_t *undo = &g_undo[g_undo_count % VOCAB_UNDO_DEPTH];
     undo->id = g_current;
@@ -817,7 +824,8 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
     journal_append(g_current, record);
     g_queue_pos++;
     if (was_new && g_new_today < 0xFFFF) g_new_today++;
-    if (g_reviews_today < 0xFFFF) g_reviews_today++;
+    /* Only due-card answers count as reviews; learning steps are part of study. */
+    if (was_review && g_reviews_today < 0xFFFF) g_reviews_today++;
 
     if (record->state == VOCAB_STATE_LEARNING || record->state == VOCAB_STATE_RELEARNING) {
         /* Remember where the learner stopped so the next session resumes here. */
@@ -869,7 +877,12 @@ bool vocab_stats(uint32_t now_min, vocab_stats_t *out) {
         const vocab_state_record_t *record = &g_records[i];
         if (record->state != VOCAB_STATE_NEW) {
             out->learned++;
-            if (record->due_min && record->due_min <= g_now) out->due_today++;
+            /* Due today only: review cards whose interval has elapsed. Cards
+               learned today (due tomorrow or in a few minutes of learning) are
+               not part of today's review queue. */
+            if ((record->state == VOCAB_STATE_REVIEW || record->state == VOCAB_STATE_RELEARNING) &&
+                record->due_min && record->due_min <= g_now)
+                out->due_today++;
         }
         out->total++;
     }

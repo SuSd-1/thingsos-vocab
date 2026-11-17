@@ -4055,6 +4055,7 @@ void app_main(void) {
            action's dragging latch set after release (notably after Home). */
         if(!input_contact)pressed=dragging=held=moved=false;
         if(healthy)auto_sleep_poll(time);
+        vocab_audio_tick();
         if(app.asleep) {xSemaphoreGive(thingsos_io_lock);continue;}
         thingsos_board_idle();
         if(app.page==THINGSOS_UI_LOCK && app.lock_snapshot_valid) {
