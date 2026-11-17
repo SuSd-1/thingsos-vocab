@@ -235,6 +235,78 @@ int main(void) {
     CHECK(vocab_count() == 6);
     vocab_close(now);
 
+    /* Review groups: one bare-word pass of ten, 模糊 stays in review while
+       忘记 returns through the three-stage relearn. */
+    char root4[256];
+    snprintf(root4, sizeof(root4), "/tmp/vocab-review-%d", (int)getpid());
+    snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s", root4, root4);
+    CHECK(system(cmd) == 0);
+    write_bank(root4, rows, 6);
+    CHECK(vocab_open(root4, now));
+    vocab_config_t rc = cfg;
+    rc.group_size = 10;
+    CHECK(vocab_begin_session(now, &rc, 1));
+    for (int i = 0; i < 6 * 3; i++) {
+        CHECK(vocab_next(&card, &stage));
+        CHECK(vocab_answer(now, VOCAB_GOOD));
+    }
+    vocab_close(now);
+    const uint32_t later = now + 30u * 24u * 60u;
+    CHECK(vocab_open(root4, later));
+    CHECK(vocab_begin_session(later, &rc, 2));
+    int seen = 0;
+    uint32_t again_id = 0;
+    for (int i = 0; i < 6; i++) {
+        CHECK(vocab_next(&card, &stage));
+        CHECK(stage == VOCAB_STAGE_WORD);
+        seen++;
+        if (i == 0) { again_id = card.id; CHECK(vocab_answer(later, VOCAB_AGAIN)); }
+        else CHECK(vocab_answer(later, i == 1 ? VOCAB_HARD : VOCAB_GOOD));
+    }
+    CHECK(seen == 6);
+    /* The forgotten card comes back as a relearn group starting from the quiz;
+       the fuzzy card does not. */
+    CHECK(vocab_next(&card, &stage));
+    CHECK(card.id == again_id && stage == VOCAB_STAGE_QUIZ);
+    vocab_close(later);
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", root4);
+    CHECK(system(cmd) == 0);
+
+    /* Group model: a group is drilled quiz -> recall -> bare word, and cards
+       that failed any round come back as a relearn group. */
+    char root3[256];
+    snprintf(root3, sizeof(root3), "/tmp/vocab-group-%d", (int)getpid());
+    snprintf(cmd, sizeof(cmd), "rm -rf %s && mkdir -p %s", root3, root3);
+    CHECK(system(cmd) == 0);
+    write_bank(root3, rows, 6);
+    CHECK(vocab_open(root3, now));
+    vocab_config_t gc = cfg;
+    gc.new_limit = 10;
+    CHECK(vocab_begin_session(now, &gc, 1));
+    uint32_t failed_id = 0;
+    for (int i = 0; i < 6; i++) {
+        CHECK(vocab_next(&card, &stage));
+        CHECK(stage == VOCAB_STAGE_QUIZ);
+        if (i == 1) failed_id = card.id;
+        CHECK(vocab_answer(now, i == 1 ? VOCAB_AGAIN : VOCAB_GOOD));
+    }
+    for (int i = 0; i < 6; i++) {
+        CHECK(vocab_next(&card, &stage));
+        CHECK(stage == VOCAB_STAGE_RECALL);
+        CHECK(vocab_answer(now, VOCAB_GOOD));
+    }
+    for (int i = 0; i < 6; i++) {
+        CHECK(vocab_next(&card, &stage));
+        CHECK(stage == VOCAB_STAGE_WORD);
+        CHECK(vocab_answer(now, VOCAB_GOOD));
+    }
+    /* The failed card reopens as the relearn group, starting from the quiz. */
+    CHECK(vocab_next(&card, &stage));
+    CHECK(card.id == failed_id && stage == VOCAB_STAGE_QUIZ);
+    vocab_close(now);
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", root3);
+    CHECK(system(cmd) == 0);
+
     /* Undo and resume across a reopen, on a small dedicated bank. */
     char root2[256];
     snprintf(root2, sizeof(root2), "/tmp/vocab-resume-%d", (int)getpid());
@@ -263,7 +335,8 @@ int main(void) {
     CHECK(vocab_open(root2, reopen));
     CHECK(vocab_begin_session(reopen, &small, 1));
     CHECK(vocab_next(&card, &stage));
-    CHECK(card.id == resume_id && stage == VOCAB_STAGE_RECALL);
+    /* The group resumes on the next card of the round, not at the start. */
+    CHECK(stage == VOCAB_STAGE_QUIZ && card.id != resume_id);
     vocab_close(reopen);
     snprintf(cmd, sizeof(cmd), "rm -rf %s", root2);
     CHECK(system(cmd) == 0);

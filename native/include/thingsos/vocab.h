@@ -72,6 +72,8 @@ typedef struct {
     uint16_t streak;
     uint32_t total;
     uint32_t learned;
+    uint32_t today_seconds;
+    uint32_t total_seconds;
     bool finished;
 } vocab_stats_t;
 
@@ -81,6 +83,10 @@ typedef struct {
     uint16_t new_limit;
     uint16_t review_limit;
     bool auto_audio;
+    uint8_t group_size;   /* cards per group, 5..20 */
+    uint8_t error_mode;   /* 0 = relearn after the group, 1 = retry at round end */
+    bool shuffle;         /* pick each group in random order */
+    bool auto_example;    /* read the example sentence after the word */
 } vocab_config_t;
 
 /* 24 bytes, persisted as-is. */
@@ -114,11 +120,18 @@ bool vocab_stats(uint32_t now_min, vocab_stats_t *out);
 bool vocab_audio_path(uint32_t id, char *buf, size_t bytes);
 bool vocab_example_audio_path(uint32_t id, char *buf, size_t bytes);
 uint32_t vocab_current_id(void);
+/* Load one card by id without touching the queue (peek at a previous word). */
+bool vocab_load_by_id(uint32_t id, vocab_card_t *out, vocab_card_stage_t *stage);
+/* Drop the saved learning plan so the next session rebuilds it. */
+void vocab_abandon_plan(void);
 /* Re-read the current card without advancing the queue (used after undo). */
 bool vocab_current_card(vocab_card_t *out, vocab_card_stage_t *stage);
 uint32_t vocab_learned_count(void);
 uint32_t vocab_new_count(void);
 uint8_t vocab_current_level(void);
+/* Group/round cursor of the active learning plan (false when none). */
+bool vocab_plan_progress(uint16_t *group, uint8_t *round, uint8_t *index, uint8_t *total,
+                         uint8_t *phase);
 /* Three meaning strings that are plausibly confusable with `id`. */
 bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]);
 vocab_card_stage_t vocab_current_stage(void);
@@ -129,6 +142,10 @@ void vocab_reveal(void);
 void vocab_config_defaults(vocab_config_t *cfg);
 bool vocab_config_load(const char *root, vocab_config_t *cfg);
 bool vocab_config_save(const char *root, const vocab_config_t *cfg);
+/* Study-time accounting (seconds). */
+bool vocab_add_seconds(uint32_t seconds);
+/* Wipe learning progress (state, journal and plan) but keep the bank/audio. */
+bool vocab_reset_progress(void);
 
 /* Log export for offline weight optimisation (best effort). */
 bool vocab_export_log(const char *path);

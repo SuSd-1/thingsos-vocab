@@ -38,7 +38,7 @@ static void *vocab_alloc(size_t count, size_t size) { return calloc(count, size)
 #define VOCAB_BANK_VERSION 4u
 #define VOCAB_INDEX_ENTRY 40u
 #define VOCAB_JOURNAL_ENTRY 32u
-#define VOCAB_CONFIG_BYTES 16u
+#define VOCAB_CONFIG_BYTES 20u
 #define VOCAB_UNDO_DEPTH 16u
 #define VOCAB_STATE_HEADER 32u
 #define VOCAB_STATE_VERSION 2u
@@ -90,6 +90,8 @@ static bool g_open;
 static uint32_t *g_queue;
 static uint32_t g_queue_len;
 static uint32_t g_queue_pos;
+static int g_focus;
+static bool g_exhausted;
 static uint32_t g_current;
 static bool g_current_valid;
 static bool g_revealed;
@@ -181,9 +183,13 @@ void vocab_config_defaults(vocab_config_t *cfg) {
     if (!cfg) return;
     cfg->mode = VOCAB_MODE_FSRS;
     cfg->target_percent = 90;
-    cfg->new_limit = 20;
+    cfg->new_limit = 60;
     cfg->review_limit = 200;
     cfg->auto_audio = true;
+    cfg->group_size = 10;
+    cfg->error_mode = 0;
+    cfg->shuffle = false;
+    cfg->auto_example = true;
 }
 
 bool vocab_config_load(const char *root, vocab_config_t *cfg) {
@@ -197,8 +203,8 @@ bool vocab_config_load(const char *root, vocab_config_t *cfg) {
     fclose(f);
     if (got != sizeof(raw) || memcmp(raw, VOCAB_CONFIG_MAGIC, 4) != 0) return false;
     uint32_t crc = 0;
-    memcpy(&crc, raw + 12, 4);
-    if (crc != crc32_bytes(raw, 12)) return false;
+    memcpy(&crc, raw + 16, 4);
+    if (crc != crc32_bytes(raw, 16)) return false;
     cfg->mode = (vocab_mode_t)raw[4];
     cfg->target_percent = raw[5];
     uint16_t value = 0;
@@ -207,9 +213,15 @@ bool vocab_config_load(const char *root, vocab_config_t *cfg) {
     memcpy(&value, raw + 8, 2);
     cfg->review_limit = value;
     cfg->auto_audio = raw[10] != 0;
+    cfg->group_size = raw[11];
+    cfg->error_mode = raw[12];
+    cfg->shuffle = raw[13] != 0;
+    cfg->auto_example = raw[14] != 0;
     if (cfg->mode != VOCAB_MODE_CLASSIC) cfg->mode = VOCAB_MODE_FSRS;
+    if (cfg->group_size < 5 || cfg->group_size > 20) cfg->group_size = 10;
+    if (cfg->error_mode > 1) cfg->error_mode = 0;
     if (cfg->target_percent < 80 || cfg->target_percent > 95) cfg->target_percent = 90;
-    if (cfg->new_limit == 0 || cfg->new_limit > 200) cfg->new_limit = 20;
+    if (cfg->new_limit == 0 || cfg->new_limit > 200) cfg->new_limit = 60;
     if (cfg->review_limit < 20 || cfg->review_limit > 2000) cfg->review_limit = 200;
     return true;
 }
@@ -224,8 +236,12 @@ bool vocab_config_save(const char *root, const vocab_config_t *cfg) {
     memcpy(raw + 6, &cfg->new_limit, 2);
     memcpy(raw + 8, &cfg->review_limit, 2);
     raw[10] = cfg->auto_audio ? 1 : 0;
-    uint32_t crc = crc32_bytes(raw, 12);
-    memcpy(raw + 12, &crc, 4);
+    raw[11] = cfg->group_size;
+    raw[12] = cfg->error_mode;
+    raw[13] = cfg->shuffle ? 1 : 0;
+    raw[14] = cfg->auto_example ? 1 : 0;
+    uint32_t crc = crc32_bytes(raw, 16);
+    memcpy(raw + 16, &crc, 4);
     FILE *f = fopen(path, "wb");
     if (!f) return false;
     bool ok = fwrite(raw, 1, sizeof(raw), f) == sizeof(raw);
@@ -584,13 +600,15 @@ static bool schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
         record->stability = memory.stability;
         record->difficulty = memory.difficulty;
         record->due_min = now_min + days * VOCAB_MINUTE_PER_DAY;
-        if (grade == VOCAB_AGAIN || grade == VOCAB_HARD) {
-            /* 模糊/不认识: strengthen with the 3-stage ladder right away. */
+        if (grade == VOCAB_AGAIN) {
+            /* 忘记: back to the three-stage ladder right away. */
             record->state = VOCAB_STATE_RELEARNING;
             record->flags = 0;
-            record->lapses += grade == VOCAB_AGAIN ? 1 : 0;
+            record->lapses++;
             record->due_min = now_min + 1;
         } else {
+            /* 认识 and 模糊 both stay in review; 模糊 just earned a shorter
+               interval from the FSRS Hard grade. */
             record->state = VOCAB_STATE_REVIEW;
             record->flags = 0;
         }
@@ -602,6 +620,178 @@ static bool schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
 }
 
 /* ------------------------------------------------------------------ queue */
+
+/* ------------------------------------------------------- learning groups ---
+ * Learning follows the reference app: ten cards form a group, the group is
+ * drilled three times (quiz, example recall, bare word), and cards that failed
+ * any round are collected into a relearn group that runs right after the
+ * current group. The plan lives in plan.dat so a power cut resumes on the same
+ * card instead of restarting the group. */
+#define PLAN_MAX 96
+#define PLAN_MAGIC 0x504C414Eu /* "PLAN" */
+#define PLAN_VERSION 1u
+#define PLAN_GROUP_SIZE 10u
+
+typedef struct {
+    uint32_t id;
+    uint8_t stage;
+    uint8_t flags; /* bit0 answered, bit1 failed */
+    uint16_t pad;
+} plan_entry_t;
+
+typedef struct {
+    uint32_t magic;
+    uint16_t version;
+    uint8_t focus;
+    uint8_t phase; /* 0 = learn rounds, 1 = relearn rounds */
+    uint16_t len;
+    uint16_t pos;
+    uint16_t group;
+    uint16_t pad;
+} plan_header_t;
+
+static uint32_t g_today_seconds;
+static uint32_t g_total_seconds;
+static uint32_t g_time_day;
+static void time_load(void);
+static bool time_save(void);
+
+static plan_header_t g_plan_hdr;
+static plan_entry_t *g_plan;
+
+static void plan_path_of(char *buf, size_t bytes) { path_of(buf, bytes, "plan.dat"); }
+
+static void plan_reset(void) {
+    memset(&g_plan_hdr, 0, sizeof(g_plan_hdr));
+    g_plan_hdr.magic = PLAN_MAGIC;
+    g_plan_hdr.version = PLAN_VERSION;
+    if (g_plan) memset(g_plan, 0, sizeof(plan_entry_t) * PLAN_MAX);
+}
+
+static bool plan_save(void) {
+    if (!g_plan) return false;
+    char path[256], tmp[288];
+    plan_path_of(path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return false;
+    bool ok = fwrite(&g_plan_hdr, 1, sizeof(g_plan_hdr), f) == sizeof(g_plan_hdr) &&
+              (g_plan_hdr.len == 0 ||
+               fwrite(g_plan, sizeof(plan_entry_t), g_plan_hdr.len, f) == g_plan_hdr.len);
+    fflush(f);
+    fclose(f);
+    if (!ok) {
+        remove(tmp);
+        return false;
+    }
+    remove(path);
+    return rename(tmp, path) == 0;
+}
+
+static bool plan_load(void) {
+    if (!g_plan) return false;
+    char path[256];
+    plan_path_of(path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    plan_header_t head;
+    bool ok = fread(&head, 1, sizeof(head), f) == sizeof(head) &&
+              head.magic == PLAN_MAGIC && head.version == PLAN_VERSION &&
+              head.len <= PLAN_MAX && head.pos <= head.len &&
+              (head.len == 0 || fread(g_plan, sizeof(plan_entry_t), head.len, f) == head.len);
+    fclose(f);
+    if (!ok) return false;
+    g_plan_hdr = head;
+    return true;
+}
+
+static void plan_build_cards(const uint32_t *ids, unsigned count, uint8_t phase,
+                             unsigned rounds) {
+    plan_reset();
+    g_plan_hdr.phase = phase;
+    unsigned n = 0;
+    /* Round-major: every card is drilled in round 1 before round 2 starts. */
+    for (unsigned round = 0; round < rounds; round++) {
+        for (unsigned card = 0; card < count && n < PLAN_MAX; card++) {
+            g_plan[n].id = ids[card];
+            g_plan[n].stage = rounds == 1 ? VOCAB_STAGE_WORD
+                              : round == 0 ? VOCAB_STAGE_QUIZ
+                              : round == 1 ? VOCAB_STAGE_RECALL
+                                           : VOCAB_STAGE_WORD;
+            g_plan[n].flags = 0;
+            n++;
+        }
+    }
+    g_plan_hdr.len = (uint16_t)n;
+    g_plan_hdr.pos = 0;
+}
+
+/* Cards in the given states, in bank order, that are due now. */
+static unsigned plan_collect(uint8_t state_a, uint8_t state_b, uint32_t now_min,
+                             uint32_t *out, unsigned max) {
+    unsigned n = 0;
+    for (uint32_t i = 0; i < g_count && n < max; i++) {
+        const vocab_state_record_t *record = &g_records[i];
+        if (record->state != state_a && record->state != state_b) continue;
+        if (state_a != VOCAB_STATE_NEW && record->due_min && record->due_min > now_min) continue;
+        out[n++] = i;
+    }
+    if (g_config.shuffle) {
+        for (unsigned i = n; i > 1; i--) {
+            const unsigned j = (unsigned)(rand() % i);
+            const uint32_t tmp = out[i - 1];
+            out[i - 1] = out[j];
+            out[j] = tmp;
+        }
+    }
+    return n;
+}
+
+static bool plan_build_learn(uint32_t now_min) {
+    uint32_t ids[32];
+    const unsigned per_group = (g_config.group_size >= 5 && g_config.group_size <= 20)
+                                   ? g_config.group_size : PLAN_GROUP_SIZE;
+    unsigned n = plan_collect(VOCAB_STATE_NEW, VOCAB_STATE_NEW, now_min, ids, per_group);
+    if (!n)
+        n = plan_collect(VOCAB_STATE_LEARNING, VOCAB_STATE_RELEARNING, now_min, ids, per_group);
+    if (!n) return false;
+    g_plan_hdr.group++;
+    plan_build_cards(ids, n, 0, 3);
+    return true;
+}
+
+static bool plan_build_relearn(void) {
+    uint32_t ids[32];
+    unsigned n = 0;
+    for (uint16_t i = 0; i < g_plan_hdr.len && n < PLAN_GROUP_SIZE; i++) {
+        if (!(g_plan[i].flags & 2)) continue;
+        bool seen = false;
+        for (unsigned k = 0; k < n; k++)
+            if (ids[k] == g_plan[i].id) seen = true;
+        if (!seen) ids[n++] = g_plan[i].id;
+    }
+    if (!n) return false;
+    plan_build_cards(ids, n, 1, 3);
+    return true;
+}
+
+static bool plan_build_review(uint32_t now_min) {
+    uint32_t ids[32];
+    const unsigned per_group = (g_config.group_size >= 5 && g_config.group_size <= 20)
+                                   ? g_config.group_size : PLAN_GROUP_SIZE;
+    unsigned n = plan_collect(VOCAB_STATE_REVIEW, VOCAB_STATE_REVIEW, now_min, ids, per_group);
+    if (!n) return false;
+    plan_build_cards(ids, n, 2, 1);
+    return true;
+}
+
+/* Move to the next plan when the current one is exhausted. */
+static bool plan_advance(uint32_t now_min) {
+    if (g_plan_hdr.pos < g_plan_hdr.len) return true;
+    if (g_plan_hdr.phase != 1 && plan_build_relearn()) return true;
+    if (g_focus == 2) return plan_build_review(now_min);
+    return plan_build_learn(now_min);
+}
 
 static void queue_push(uint32_t id) {
     if (!g_queue || g_queue_len >= g_count) return;
@@ -686,6 +876,8 @@ bool vocab_open(const char *root, uint32_t now_min) {
         return false;
     }
     journal_replay();
+    g_plan = vocab_alloc(PLAN_MAX, sizeof(plan_entry_t));
+    time_load();
     g_queue = vocab_alloc(g_count ? g_count : 1, sizeof(uint32_t));
     vocab_config_load(g_root, &g_config);
     g_open = true;
@@ -701,6 +893,8 @@ void vocab_close(uint32_t now_min) {
     bank_close();
     free(g_records);
     free(g_queue);
+    free(g_plan);
+    g_plan = NULL;
     g_records = NULL;
     g_queue = NULL;
     g_count = 0;
@@ -738,7 +932,27 @@ bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus)
         g_new_today = 0;
         g_reviews_today = 0;
     }
-    queue_build(now_min, &g_config, focus);
+    g_focus = focus;
+    g_exhausted = false;
+    if (focus == 1 || focus == 2 || focus == 3) {
+        bool usable = plan_load() && g_plan_hdr.focus == (uint8_t)focus &&
+                      g_plan_hdr.pos < g_plan_hdr.len;
+        if (!usable) {
+            bool built = false;
+            if (focus == 3) {
+                uint32_t ids[PLAN_GROUP_SIZE];
+                unsigned n = plan_collect(VOCAB_STATE_LEARNING, VOCAB_STATE_RELEARNING,
+                                          now_min, ids, PLAN_GROUP_SIZE);
+                if (n) { plan_build_cards(ids, n, 1, 3); built = true; }
+            }
+            if (!built && focus == 2) built = plan_build_review(now_min);
+            if (!built) plan_build_learn(now_min);
+            g_plan_hdr.focus = (uint8_t)focus;
+            plan_save();
+        }
+    } else {
+        queue_build(now_min, &g_config, focus);
+    }
     return true;
 }
 
@@ -773,7 +987,35 @@ static bool load_card(uint32_t id, vocab_card_t *out, vocab_card_stage_t *stage)
 }
 
 bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage) {
-    if (!g_open || !out || !g_queue) return false;
+    if (!g_open || !out) return false;
+    if ((g_focus == 1 || g_focus == 2 || g_focus == 3) && g_plan) {
+        for (;;) {
+            while (g_plan_hdr.pos < g_plan_hdr.len) {
+                plan_entry_t *entry = &g_plan[g_plan_hdr.pos];
+                if ((entry->flags & 1) || entry->id >= g_count) {
+                    g_plan_hdr.pos++;
+                    continue;
+                }
+                g_current = entry->id;
+                g_current_valid = true;
+                g_revealed = false;
+                if (!load_card(entry->id, out, stage)) {
+                    g_plan_hdr.pos++;
+                    continue;
+                }
+                g_stage = (vocab_card_stage_t)entry->stage;
+                if (stage) *stage = g_stage;
+                return true;
+            }
+            if (!plan_advance(g_now)) {
+                g_exhausted = true;
+                g_current_valid = false;
+                return false;
+            }
+            plan_save();
+        }
+    }
+    if (!g_queue) return false;
     while (g_queue_pos < g_queue_len) {
         uint32_t id = g_queue[g_queue_pos];
         if (id >= g_count) {
@@ -796,6 +1038,18 @@ bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage) {
     }
     g_current_valid = false;
     return false;
+}
+
+bool vocab_load_by_id(uint32_t id, vocab_card_t *out, vocab_card_stage_t *stage) {
+    if (!g_open || !out || id >= g_count) return false;
+    return load_card(id, out, stage);
+}
+
+void vocab_abandon_plan(void) {
+    plan_reset();
+    char path[256];
+    plan_path_of(path, sizeof(path));
+    remove(path);
 }
 
 bool vocab_current_card(vocab_card_t *out, vocab_card_stage_t *stage) {
@@ -827,8 +1081,31 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
     /* Only due-card answers count as reviews; learning steps are part of study. */
     if (was_review && g_reviews_today < 0xFFFF) g_reviews_today++;
 
-    if (record->state == VOCAB_STATE_LEARNING || record->state == VOCAB_STATE_RELEARNING) {
-        /* Remember where the learner stopped so the next session resumes here. */
+    if (g_focus == 1 || g_focus == 2 || g_focus == 3) {
+        if (g_plan_hdr.pos < g_plan_hdr.len) {
+            plan_entry_t *entry = &g_plan[g_plan_hdr.pos];
+            entry->flags = (uint8_t)(1u | (grade == VOCAB_AGAIN ? 2u : 0u));
+            g_plan_hdr.pos++;
+            /* 不背单词 style: a wrong card is retried at the end of its round. */
+            if (g_config.error_mode == 1 && grade == VOCAB_AGAIN && g_plan_hdr.len < PLAN_MAX) {
+                unsigned same = 0;
+                for (uint16_t i = 0; i < g_plan_hdr.len; i++)
+                    if (g_plan[i].id == entry->id && g_plan[i].stage == entry->stage) same++;
+                if (same < 3) {
+                    unsigned insert_at = g_plan_hdr.len;
+                    for (uint16_t i = 0; i < g_plan_hdr.len; i++)
+                        if (g_plan[i].stage == entry->stage) insert_at = (unsigned)i + 1;
+                    memmove(&g_plan[insert_at + 1], &g_plan[insert_at],
+                            (g_plan_hdr.len - insert_at) * sizeof(plan_entry_t));
+                    memset(&g_plan[insert_at], 0, sizeof(plan_entry_t));
+                    g_plan[insert_at].id = entry->id;
+                    g_plan[insert_at].stage = entry->stage;
+                    g_plan_hdr.len++;
+                }
+            }
+            plan_save();
+        }
+    } else if (record->state == VOCAB_STATE_LEARNING || record->state == VOCAB_STATE_RELEARNING) {
         g_resume_id = g_current;
         g_resume_day = now_min / VOCAB_MINUTE_PER_DAY;
         queue_reinsert(g_current);
@@ -845,7 +1122,13 @@ bool vocab_undo(uint32_t now_min) {
     vocab_undo_t *undo = &g_undo[g_undo_count % VOCAB_UNDO_DEPTH];
     if (undo->id >= g_count) return false;
     g_records[undo->id] = undo->record;
-    g_queue_pos = undo->queue_pos;
+    if ((g_focus == 1 || g_focus == 2 || g_focus == 3) && g_plan) {
+        g_plan_hdr.pos = (uint16_t)undo->queue_pos;
+        if (g_plan_hdr.pos < g_plan_hdr.len) g_plan[g_plan_hdr.pos].flags = 0;
+        plan_save();
+    } else {
+        g_queue_pos = undo->queue_pos;
+    }
     g_new_today = undo->new_today;
     g_reviews_today = undo->reviews_today;
     g_current = undo->id;
@@ -864,6 +1147,58 @@ bool vocab_undo(uint32_t now_min) {
         fclose(f);
     }
     return true;
+}
+
+static void time_path(char *buf, size_t bytes) { path_of(buf, bytes, "time.dat"); }
+
+static bool time_save(void) {
+    char path[256], tmp[288];
+    time_path(path, sizeof(path));
+    snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+    unsigned char raw[20] = {0};
+    memcpy(raw, "VOCT", 4);
+    memcpy(raw + 4, &g_time_day, 4);
+    memcpy(raw + 8, &g_today_seconds, 4);
+    memcpy(raw + 12, &g_total_seconds, 4);
+    uint32_t crc = crc32_bytes(raw, 16);
+    memcpy(raw + 16, &crc, 4);
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return false;
+    bool ok = fwrite(raw, 1, sizeof(raw), f) == sizeof(raw);
+    fflush(f);
+    fclose(f);
+    if (!ok) { remove(tmp); return false; }
+    remove(path);
+    return rename(tmp, path) == 0;
+}
+
+static void time_load(void) {
+    char path[256];
+    time_path(path, sizeof(path));
+    FILE *f = fopen(path, "rb");
+    if (!f) return;
+    unsigned char raw[20];
+    bool ok = fread(raw, 1, sizeof(raw), f) == sizeof(raw) && memcmp(raw, "VOCT", 4) == 0;
+    fclose(f);
+    if (!ok) return;
+    uint32_t crc = 0;
+    memcpy(&crc, raw + 16, 4);
+    if (crc != crc32_bytes(raw, 16)) return;
+    memcpy(&g_time_day, raw + 4, 4);
+    memcpy(&g_today_seconds, raw + 8, 4);
+    memcpy(&g_total_seconds, raw + 12, 4);
+}
+
+bool vocab_add_seconds(uint32_t seconds) {
+    if (!seconds) return true;
+    const uint32_t today = g_now / VOCAB_MINUTE_PER_DAY;
+    if (g_time_day != today) {
+        g_time_day = today;
+        g_today_seconds = 0;
+    }
+    g_today_seconds += seconds;
+    g_total_seconds += seconds;
+    return time_save();
 }
 
 bool vocab_stats(uint32_t now_min, vocab_stats_t *out) {
@@ -886,8 +1221,32 @@ bool vocab_stats(uint32_t now_min, vocab_stats_t *out) {
         }
         out->total++;
     }
-    out->finished = g_queue_pos >= g_queue_len;
+    const uint32_t today = g_now / VOCAB_MINUTE_PER_DAY;
+    out->today_seconds = (g_time_day == today) ? g_today_seconds : 0;
+    out->total_seconds = g_total_seconds;
+    out->finished = g_exhausted;
     return true;
+}
+
+bool vocab_reset_progress(void) {
+    if (!g_open || !g_records) return false;
+    for (uint32_t i = 0; i < g_count; i++) record_default(&g_records[i]);
+    g_new_today = 0;
+    g_reviews_today = 0;
+    g_streak = 0;
+    g_last_day = 0;
+    g_undo_count = 0;
+    g_resume_id = 0xFFFFFFFFu;
+    g_queue_len = g_queue_pos = 0;
+    plan_reset();
+    char path[256];
+    state_path(path, sizeof(path));
+    remove(path);
+    journal_path(path, sizeof(path));
+    remove(path);
+    plan_path_of(path, sizeof(path));
+    remove(path);
+    return state_save();
 }
 
 bool vocab_audio_path(uint32_t id, char *buf, size_t bytes) {
@@ -909,6 +1268,19 @@ uint32_t vocab_new_count(void) {
     for (uint32_t i = 0; i < g_count; i++)
         if (g_records[i].state == VOCAB_STATE_NEW) fresh++;
     return fresh;
+}
+
+bool vocab_plan_progress(uint16_t *group, uint8_t *round, uint8_t *index, uint8_t *total,
+                         uint8_t *phase) {
+    if (!g_open || g_plan_hdr.len == 0) return false;
+    const unsigned per_round = g_plan_hdr.len / 3u;
+    if (!per_round) return false;
+    if (group) *group = g_plan_hdr.group;
+    if (round) *round = (uint8_t)(g_plan_hdr.pos / per_round + 1);
+    if (index) *index = (uint8_t)(g_plan_hdr.pos % per_round + 1);
+    if (total) *total = (uint8_t)per_round;
+    if (phase) *phase = g_plan_hdr.phase;
+    return true;
 }
 
 uint32_t vocab_learned_count(void) {
