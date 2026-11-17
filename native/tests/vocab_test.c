@@ -47,7 +47,7 @@ static void write_bank(const char *dir, const bank_row_t *rows, size_t count) {
     CHECK(f != NULL);
 
     const uint32_t index_off = 32;
-    const uint32_t strings_off = index_off + (uint32_t)(count * 32);
+    const uint32_t strings_off = index_off + (uint32_t)(count * 40);
     unsigned char *strings = calloc(1, 1 << 16);
     size_t at = 1; /* 0 is a valid "empty string" offset */
     uint32_t offsets[16][7];
@@ -66,7 +66,7 @@ static void write_bank(const char *dir, const bank_row_t *rows, size_t count) {
 
     unsigned char head[32] = {0};
     memcpy(head, "VOCB", 4);
-    put16(head + 4, 3); /* bank format version */
+    put16(head + 4, 4); /* bank format version */
     put16(head + 6, (uint16_t)count);
     put32(head + 8, index_off);
     put32(head + 12, strings_off);
@@ -75,7 +75,7 @@ static void write_bank(const char *dir, const bank_row_t *rows, size_t count) {
     fwrite(head, 1, sizeof(head), f);
 
     for (size_t i = 0; i < count && i < 16; i++) {
-        unsigned char entry[32] = {0};
+        unsigned char entry[40] = {0};
         put32(entry + 0, offsets[i][0]); /* word */
         put32(entry + 4, offsets[i][2]); /* meaning */
         put32(entry + 8, offsets[i][3]); /* example_en */
@@ -83,7 +83,9 @@ static void write_bank(const char *dir, const bank_row_t *rows, size_t count) {
         put32(entry + 16, offsets[i][5]); /* root */
         put32(entry + 20, offsets[i][1]); /* phonetic */
         put32(entry + 24, offsets[i][6]); /* group */
-        put32(entry + 28, offsets[i][1]); /* pos: reuse phonetic string in the fixture */
+        put32(entry + 28, offsets[i][1]); /* pos */
+        put32(entry + 32, offsets[i][5]); /* derived (fixture reuses root) */
+        put32(entry + 36, offsets[i][3]); /* phrase (fixture reuses example) */
         fwrite(entry, 1, sizeof(entry), f);
     }
     fwrite(strings, 1, at, f);
@@ -229,6 +231,39 @@ int main(void) {
     CHECK(vocab_open(root, now));
     CHECK(vocab_count() == 6);
     vocab_close(now);
+
+    /* Undo and resume across a reopen, on a small dedicated bank. */
+    char root2[256];
+    snprintf(root2, sizeof(root2), "/tmp/vocab-resume-%d", (int)getpid());
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", root2);
+    CHECK(system(cmd) == 0);
+    snprintf(cmd, sizeof(cmd), "mkdir -p %s", root2);
+    CHECK(system(cmd) == 0);
+    write_bank(root2, rows, 6);
+
+    CHECK(vocab_open(root2, now));
+    vocab_config_t small = cfg;
+    small.new_limit = 1;
+    CHECK(vocab_begin_session(now, &small, 1));
+    CHECK(vocab_next(&card, &stage));
+    CHECK(stage == VOCAB_STAGE_QUIZ);
+    CHECK(card.derived[0] != 0);   /* bank v4 fields are parsed */
+    const uint32_t resume_id = card.id;
+    CHECK(vocab_answer(now, VOCAB_GOOD));
+    CHECK(vocab_undo(now));
+    CHECK(vocab_current_card(&card, &stage));
+    CHECK(card.id == resume_id && stage == VOCAB_STAGE_QUIZ);
+    CHECK(vocab_answer(now, VOCAB_GOOD));
+    vocab_close(now);
+
+    const uint32_t reopen = now + 6;
+    CHECK(vocab_open(root2, reopen));
+    CHECK(vocab_begin_session(reopen, &small, 1));
+    CHECK(vocab_next(&card, &stage));
+    CHECK(card.id == resume_id && stage == VOCAB_STAGE_RECALL);
+    vocab_close(reopen);
+    snprintf(cmd, sizeof(cmd), "rm -rf %s", root2);
+    CHECK(system(cmd) == 0);
 
     snprintf(cmd, sizeof(cmd), "rm -rf %s", root);
     CHECK(system(cmd) == 0);

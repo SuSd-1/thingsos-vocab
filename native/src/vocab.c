@@ -18,16 +18,24 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#ifdef ESP_PLATFORM
+#include "esp_log.h"
+#define VOCAB_LOG(...) ESP_LOGI("vocab", __VA_ARGS__)
+#else
+#define VOCAB_LOG(...) ((void)0)
+#endif
+
 #define VOCAB_STATE_MAGIC "VOCS"
 #define VOCAB_BANK_MAGIC "VOCB"
 #define VOCAB_CONFIG_MAGIC "VOCC"
 #define VOCAB_VERSION 1u
-#define VOCAB_BANK_VERSION 3u
-#define VOCAB_INDEX_ENTRY 32u
+#define VOCAB_BANK_VERSION 4u
+#define VOCAB_INDEX_ENTRY 40u
 #define VOCAB_JOURNAL_ENTRY 32u
 #define VOCAB_CONFIG_BYTES 16u
 #define VOCAB_UNDO_DEPTH 16u
-#define VOCAB_STATE_HEADER 24u
+#define VOCAB_STATE_HEADER 32u
+#define VOCAB_STATE_VERSION 2u
 #define VOCAB_LEARN_AGAIN_MIN 1u
 #define VOCAB_LEARN_GOOD_MIN 10u
 #define VOCAB_RELEARN_MIN 10u
@@ -39,6 +47,7 @@ typedef struct {
     uint32_t index_off;
     uint32_t strings_off;
     uint32_t bank_hash;
+    uint32_t entry_bytes; /* 32 (v3) or 40 (v4) */
 } vocab_bank_t;
 
 typedef struct {
@@ -50,6 +59,8 @@ typedef struct {
     uint32_t phonetic_off;
     uint32_t group_off;
     uint32_t pos_off;
+    uint32_t derived_off;
+    uint32_t phrase_off;
 } vocab_index_t;
 
 typedef struct {
@@ -63,6 +74,7 @@ typedef struct {
 _Static_assert(sizeof(vocab_state_record_t) == 28, "state record layout");
 
 static vocab_bank_t g_bank;
+static vocab_index_t *g_index;
 static vocab_state_record_t *g_records;
 static uint32_t g_count;
 static uint32_t g_bank_hash;
@@ -78,6 +90,8 @@ static bool g_revealed;
 static vocab_card_stage_t g_stage;
 
 static uint32_t g_now;
+static uint32_t g_resume_id = 0xFFFFFFFFu;
+static uint32_t g_resume_day;
 static uint32_t g_last_day;
 static uint16_t g_streak;
 static uint16_t g_new_today;
@@ -232,11 +246,17 @@ static bool read_string(uint32_t offset, char *buf, size_t bytes) {
 }
 
 static bool read_index(uint32_t id, vocab_index_t *index) {
-    if (!g_bank.file || id >= g_bank.count) return false;
-    if (fseek(g_bank.file, (long)(g_bank.index_off + id * VOCAB_INDEX_ENTRY), SEEK_SET) != 0)
+    if (id >= g_bank.count) return false;
+    if (g_index) {
+        *index = g_index[id];
+        return true;
+    }
+    if (!g_bank.file) return false;
+    if (fseek(g_bank.file, (long)(g_bank.index_off + id * g_bank.entry_bytes), SEEK_SET) != 0)
         return false;
     unsigned char raw[VOCAB_INDEX_ENTRY];
-    if (fread(raw, 1, sizeof(raw), g_bank.file) != sizeof(raw)) return false;
+    const size_t want = g_bank.entry_bytes ? g_bank.entry_bytes : VOCAB_INDEX_ENTRY;
+    if (fread(raw, 1, want, g_bank.file) != want) return false;
     memset(index, 0, sizeof(*index));
     memcpy(&index->word_off, raw + 0, 4);
     memcpy(&index->meaning_off, raw + 4, 4);
@@ -246,6 +266,10 @@ static bool read_index(uint32_t id, vocab_index_t *index) {
     memcpy(&index->phonetic_off, raw + 20, 4);
     memcpy(&index->group_off, raw + 24, 4);
     memcpy(&index->pos_off, raw + 28, 4);
+    if (want >= 40) {
+        memcpy(&index->derived_off, raw + 32, 4);
+        memcpy(&index->phrase_off, raw + 36, 4);
+    }
     return true;
 }
 
@@ -260,7 +284,9 @@ static bool bank_open(void) {
     uint16_t version = 0, count = 0;
     memcpy(&version, head + 4, 2);
     memcpy(&count, head + 6, 2);
-    if (version != VOCAB_BANK_VERSION || count == 0 || count > 20000u) return false;
+    if ((version != VOCAB_BANK_VERSION && version != 3u) || count == 0 || count > 20000u)
+        return false;
+    g_bank.entry_bytes = version == 3u ? 32u : 40u;
     memcpy(&g_bank.index_off, head + 8, 4);
     memcpy(&g_bank.strings_off, head + 12, 4);
     memcpy(&g_bank.bank_hash, head + 16, 4);
@@ -268,11 +294,42 @@ static bool bank_open(void) {
     memcpy(&stored, head + 28, 4);
     if (stored != crc32_bytes(head, 28)) return false;
     g_bank.count = count;
+    /* Load the whole index once (32 B per card): 5000 cards = 160 KB from PSRAM. */
+    g_index = calloc(count, sizeof(vocab_index_t));
+    if (g_index) {
+        for (uint32_t i = 0; i < count; i++) {
+            if (fseek(g_bank.file, (long)(g_bank.index_off + i * g_bank.entry_bytes), SEEK_SET) != 0) {
+                free(g_index);
+                g_index = NULL;
+                break;
+            }
+            unsigned char raw[VOCAB_INDEX_ENTRY] = {0};
+            if (fread(raw, 1, g_bank.entry_bytes, g_bank.file) != g_bank.entry_bytes) {
+                free(g_index);
+                g_index = NULL;
+                break;
+            }
+            memcpy(&g_index[i].word_off, raw + 0, 4);
+            memcpy(&g_index[i].meaning_off, raw + 4, 4);
+            memcpy(&g_index[i].example_en_off, raw + 8, 4);
+            memcpy(&g_index[i].example_zh_off, raw + 12, 4);
+            memcpy(&g_index[i].root_off, raw + 16, 4);
+            memcpy(&g_index[i].phonetic_off, raw + 20, 4);
+            memcpy(&g_index[i].group_off, raw + 24, 4);
+            memcpy(&g_index[i].pos_off, raw + 28, 4);
+            if (g_bank.entry_bytes >= 40) {
+                memcpy(&g_index[i].derived_off, raw + 32, 4);
+                memcpy(&g_index[i].phrase_off, raw + 36, 4);
+            }
+        }
+    }
     return true;
 }
 
 static void bank_close(void) {
     if (g_bank.file) fclose(g_bank.file);
+    free(g_index);
+    g_index = NULL;
     memset(&g_bank, 0, sizeof(g_bank));
 }
 
@@ -311,7 +368,9 @@ static bool state_load(void) {
     memcpy(&new_today, head + 14, 2);
     memcpy(&reviews, head + 16, 2);
     memcpy(&bank_hash, head + 20, 4);
-    if (version != VOCAB_VERSION || stored_count != (uint16_t)g_count ||
+    memcpy(&g_resume_id, head + 24, 4);
+    memcpy(&g_resume_day, head + 28, 4);
+    if (version != VOCAB_STATE_VERSION || stored_count != (uint16_t)g_count ||
         bank_hash != g_bank_hash) {
         fclose(f);
         return true;
@@ -328,6 +387,8 @@ static bool state_load(void) {
               stored_crc == crc32_bytes(tmp, bytes);
     fclose(f);
     if (ok) {
+        VOCAB_LOG("state loaded: %u cards, resume=%d day=%u", (unsigned)g_count,
+                  (int)g_resume_id, (unsigned)g_resume_day);
         memcpy(g_records, tmp, bytes);
         g_last_day = last_day;
         g_streak = streak;
@@ -347,7 +408,7 @@ static bool state_save(void) {
     size_t bytes = (size_t)g_count * sizeof(vocab_state_record_t);
     unsigned char head[VOCAB_STATE_HEADER] = {0};
     memcpy(head, VOCAB_STATE_MAGIC, 4);
-    uint16_t version = VOCAB_VERSION, count = (uint16_t)g_count;
+    uint16_t version = VOCAB_STATE_VERSION, count = (uint16_t)g_count;
     memcpy(head + 4, &version, 2);
     memcpy(head + 6, &count, 2);
     memcpy(head + 8, &g_last_day, 4);
@@ -355,6 +416,8 @@ static bool state_save(void) {
     memcpy(head + 14, &g_new_today, 2);
     memcpy(head + 16, &g_reviews_today, 2);
     memcpy(head + 20, &g_bank_hash, 4);
+    memcpy(head + 24, &g_resume_id, 4);
+    memcpy(head + 28, &g_resume_day, 4);
 
     FILE *f = fopen(tmp_path, "wb");
     if (!f) return false;
@@ -369,7 +432,12 @@ static bool state_save(void) {
         return false;
     }
     remove(path);
-    if (rename(tmp_path, path) != 0) return false;
+    if (rename(tmp_path, path) != 0) {
+        VOCAB_LOG("state save failed: rename %s", path);
+        return false;
+    }
+    VOCAB_LOG("state saved: %u cards, resume=%d day=%u", (unsigned)g_count,
+              (int)g_resume_id, (unsigned)g_resume_day);
     FILE *j = fopen(journal, "wb");
     if (j) fclose(j);
     return true;
@@ -394,12 +462,15 @@ static void journal_replay(void) {
     FILE *f = fopen(path, "rb");
     if (!f) return;
     unsigned char raw[VOCAB_JOURNAL_ENTRY];
+    unsigned replayed = 0;
     while (fread(raw, 1, sizeof(raw), f) == sizeof(raw)) {
         uint32_t id = 0;
         memcpy(&id, raw, 4);
         if (id >= g_count) continue;
         memcpy(&g_records[id], raw + 4, sizeof(vocab_state_record_t));
+        replayed++;
     }
+    if (replayed) VOCAB_LOG("journal replayed: %u entries", replayed);
     fclose(f);
 }
 
@@ -548,6 +619,16 @@ static void queue_build(uint32_t now_min, const vocab_config_t *cfg, int focus) 
             }
         }
     }
+    if (focus == 1 || focus == 3) {
+        const uint32_t today = now_min / VOCAB_MINUTE_PER_DAY;
+        if (g_resume_id < g_count && g_resume_day == today) {
+            const vocab_state_record_t *resume = &g_records[g_resume_id];
+            if ((resume->state == VOCAB_STATE_LEARNING || resume->state == VOCAB_STATE_RELEARNING) &&
+                resume->due_min <= now_min) {
+                queue_push(g_resume_id);
+            }
+        }
+    }
     if (focus == 2) return;
     for (uint32_t i = 0; i < g_count; i++) {
         vocab_state_record_t *record = &g_records[i];
@@ -655,6 +736,36 @@ bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus)
     return true;
 }
 
+static bool load_card(uint32_t id, vocab_card_t *out, vocab_card_stage_t *stage) {
+    vocab_index_t index;
+    if (!read_index(id, &index)) return false;
+    memset(out, 0, sizeof(*out));
+    out->id = id;
+    read_string(index.word_off, out->word, sizeof(out->word));
+    read_string(index.phonetic_off, out->phonetic, sizeof(out->phonetic));
+    read_string(index.meaning_off, out->meaning, sizeof(out->meaning));
+    read_string(index.example_en_off, out->example_en, sizeof(out->example_en));
+    read_string(index.example_zh_off, out->example_zh, sizeof(out->example_zh));
+    read_string(index.root_off, out->root, sizeof(out->root));
+    read_string(index.group_off, out->group, sizeof(out->group));
+    read_string(index.pos_off, out->pos, sizeof(out->pos));
+    read_string(index.derived_off, out->derived, sizeof(out->derived));
+    read_string(index.phrase_off, out->phrase, sizeof(out->phrase));
+
+    const vocab_state_record_t *record = &g_records[id];
+    if (record->state == VOCAB_STATE_NEW || record->state == VOCAB_STATE_LEARNING ||
+        record->state == VOCAB_STATE_RELEARNING) {
+        const uint8_t level = record->flags & 0x03u;
+        g_stage = level == 0 ? VOCAB_STAGE_QUIZ
+                  : level == 1 ? VOCAB_STAGE_RECALL
+                               : VOCAB_STAGE_WORD;
+    } else {
+        g_stage = VOCAB_STAGE_WORD; /* review always asks for the bare word */
+    }
+    if (stage) *stage = g_stage;
+    return true;
+}
+
 bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage) {
     if (!g_open || !out || !g_queue) return false;
     while (g_queue_pos < g_queue_len) {
@@ -671,37 +782,20 @@ bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage) {
         g_current = id;
         g_current_valid = true;
         g_revealed = false;
-
-        vocab_index_t index;
-        if (!read_index(id, &index)) {
+        if (!load_card(id, out, stage)) {
             g_queue_pos++;
             continue;
         }
-        memset(out, 0, sizeof(*out));
-        out->id = id;
-        read_string(index.word_off, out->word, sizeof(out->word));
-        read_string(index.phonetic_off, out->phonetic, sizeof(out->phonetic));
-        read_string(index.meaning_off, out->meaning, sizeof(out->meaning));
-        read_string(index.example_en_off, out->example_en, sizeof(out->example_en));
-        read_string(index.example_zh_off, out->example_zh, sizeof(out->example_zh));
-        read_string(index.root_off, out->root, sizeof(out->root));
-        read_string(index.group_off, out->group, sizeof(out->group));
-        read_string(index.pos_off, out->pos, sizeof(out->pos));
-
-        if (record->state == VOCAB_STATE_NEW || record->state == VOCAB_STATE_LEARNING ||
-            record->state == VOCAB_STATE_RELEARNING) {
-            const uint8_t level = record->flags & 0x03u;
-            g_stage = level == 0 ? VOCAB_STAGE_QUIZ
-                      : level == 1 ? VOCAB_STAGE_RECALL
-                                   : VOCAB_STAGE_WORD;
-        } else {
-            g_stage = VOCAB_STAGE_WORD; /* review always asks for the bare word */
-        }
-        if (stage) *stage = g_stage;
         return true;
     }
     g_current_valid = false;
     return false;
+}
+
+bool vocab_current_card(vocab_card_t *out, vocab_card_stage_t *stage) {
+    if (!g_open || !g_current_valid || !out) return false;
+    g_revealed = false;
+    return load_card(g_current, out, stage);
 }
 
 bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
@@ -721,13 +815,18 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
 
     schedule_record(record, grade, now_min, &g_config);
     journal_append(g_current, record);
-    log_review(g_current, (int)grade, now_min, record);
     g_queue_pos++;
     if (was_new && g_new_today < 0xFFFF) g_new_today++;
     if (g_reviews_today < 0xFFFF) g_reviews_today++;
 
-    if (record->state == VOCAB_STATE_LEARNING || record->state == VOCAB_STATE_RELEARNING)
+    if (record->state == VOCAB_STATE_LEARNING || record->state == VOCAB_STATE_RELEARNING) {
+        /* Remember where the learner stopped so the next session resumes here. */
+        g_resume_id = g_current;
+        g_resume_day = now_min / VOCAB_MINUTE_PER_DAY;
         queue_reinsert(g_current);
+    } else {
+        g_resume_id = 0xFFFFFFFFu;
+    }
     g_current_valid = false;
     return true;
 }
@@ -784,6 +883,12 @@ bool vocab_audio_path(uint32_t id, char *buf, size_t bytes) {
     return access(buf, R_OK) == 0;
 }
 
+bool vocab_example_audio_path(uint32_t id, char *buf, size_t bytes) {
+    if (!buf || bytes == 0) return false;
+    snprintf(buf, bytes, "%s/.thingsos/vocab/audio/%u_ex.mp3", g_root, (unsigned)id);
+    return access(buf, R_OK) == 0;
+}
+
 uint32_t vocab_current_id(void) { return g_current_valid ? g_current : 0xFFFFFFFFu; }
 
 uint32_t vocab_new_count(void) {
@@ -813,7 +918,7 @@ bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]) {
     read_string(self.meaning_off, target, sizeof(target));
     const size_t want = strlen(target);
     unsigned found = 0;
-    for (uint32_t step = 1; step < g_count && found < 3; step++) {
+    for (uint32_t step = 1; step < g_count && found < 3 && step < 24; step++) {
         const uint32_t candidate = (id + step * 7u) % g_count;
         if (candidate == id) continue;
         vocab_index_t other;
@@ -830,7 +935,7 @@ bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]) {
         snprintf(out[found], VOCAB_MEANING_BYTES, "%s", meaning);
         found++;
     }
-    for (uint32_t step = 1; step < g_count && found < 3; step++) {
+    for (uint32_t step = 1; step < g_count && found < 3 && step < 24; step++) {
         const uint32_t candidate = (id + step * 13u) % g_count;
         if (candidate == id) continue;
         vocab_index_t other;

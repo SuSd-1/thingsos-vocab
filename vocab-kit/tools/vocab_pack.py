@@ -27,10 +27,15 @@ import sys
 import zlib
 from pathlib import Path
 
-VERSION = 3  # bank format: 32-byte index entries, 8 x uint32 (incl. pos)
+VERSION = 4  # bank format: 40-byte index entries, 10 x uint32
 HEADER = 32
 INDEX_ENTRY = 28
-COLUMNS = ["word", "phonetic", "pos", "meaning", "example_en", "example_zh", "root", "group"]
+COLUMNS = ["word", "phonetic", "pos", "meaning", "example_en", "example_zh", "root", "group", "derived", "phrase"]
+POS_ALIASES = {
+    "a.": "adj.", "adj": "adj.", "ad.": "adv.", "adv": "adv.",
+    "v": "v.", "vt": "vt.", "vi": "vi.", "n": "n.", "prep": "prep.",
+    "conj": "conj.", "pron": "pron.", "num": "num.", "int": "int.",
+}
 
 
 def read_rows(path: Path) -> tuple[list[dict[str, str]], list[str]]:
@@ -53,7 +58,9 @@ def read_rows(path: Path) -> tuple[list[dict[str, str]], list[str]]:
                 problems.append(f"line {line_no}: duplicate '{word}', kept first")
                 continue
             seen[key] = line_no
-            rows.append({c: (row.get(c) or "").strip() for c in COLUMNS})
+            entry = {c: (row.get(c) or "").strip() for c in COLUMNS}
+            entry["pos"] = POS_ALIASES.get(entry["pos"], entry["pos"])
+            rows.append(entry)
     return rows, problems
 
 
@@ -97,9 +104,10 @@ def build_bank(rows: list[dict[str, str]]) -> bytes:
     index = bytearray()
     for entry in offsets:
         index += struct.pack(
-            "<IIIIIIII",
+            "<IIIIIIIIII",
             entry["word"], entry["meaning"], entry["example_en"], entry["example_zh"],
             entry["root"], entry["phonetic"], entry["group"], entry["pos"],
+            entry["derived"], entry["phrase"],
         )
 
     index_off = HEADER
@@ -147,6 +155,12 @@ def main() -> int:
                 converted += 1
             else:
                 problems.append(f"{row['word']}: audio conversion failed")
+            example = find_audio(args.audio_dir, f"{row['word']}_ex")
+            if example is not None:
+                if convert_audio(example, audio_out / f"{index}_ex.mp3"):
+                    converted += 1
+                else:
+                    problems.append(f"{row['word']}: example audio conversion failed")
 
     report = [
         f"words: {len(rows)}",

@@ -18,6 +18,8 @@
 #define VOCAB_ROOT_BYTES 96
 #define VOCAB_GROUP_BYTES 24
 #define VOCAB_POS_BYTES 12
+#define VOCAB_DERIVED_BYTES 160
+#define VOCAB_PHRASE_BYTES 200
 
 #define VOCAB_MAX_CARDS 100000u
 #define VOCAB_MINUTE_PER_DAY 1440u
@@ -59,6 +61,8 @@ typedef struct {
     char root[VOCAB_ROOT_BYTES];
     char group[VOCAB_GROUP_BYTES];
     char pos[VOCAB_POS_BYTES];
+    char derived[VOCAB_DERIVED_BYTES];
+    char phrase[VOCAB_PHRASE_BYTES];
 } vocab_card_t;
 
 typedef struct {
@@ -108,7 +112,10 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade);
 bool vocab_undo(uint32_t now_min);
 bool vocab_stats(uint32_t now_min, vocab_stats_t *out);
 bool vocab_audio_path(uint32_t id, char *buf, size_t bytes);
+bool vocab_example_audio_path(uint32_t id, char *buf, size_t bytes);
 uint32_t vocab_current_id(void);
+/* Re-read the current card without advancing the queue (used after undo). */
+bool vocab_current_card(vocab_card_t *out, vocab_card_stage_t *stage);
 uint32_t vocab_learned_count(void);
 uint32_t vocab_new_count(void);
 uint8_t vocab_current_level(void);
