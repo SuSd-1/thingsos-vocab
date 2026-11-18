@@ -110,17 +110,23 @@ if [ "$CHECK_HEALTH" = "1" ] && python3 -c 'import serial' >/dev/null 2>&1; then
 import sys, time
 import serial
 port = sys.argv[1]
-try:
-    s = serial.Serial(port, 115200, timeout=0.3)
-except Exception:
+# The port re-enumerates after the reset; retry opening it for a while.
+s = None
+for _ in range(30):
+    try:
+        s = serial.Serial(port, 115200, timeout=0.3)
+        break
+    except Exception:
+        time.sleep(0.5)
+if s is None:
     print("skip"); raise SystemExit(0)
-deadline = time.time() + 30
+deadline = time.time() + 60
 seen = "none"
 while time.time() < deadline:
     try:
         data = s.read(4096)
     except Exception:
-        break
+        data = None
     if not data:
         continue
     text = data.decode("utf-8", "replace")
@@ -128,6 +134,9 @@ while time.time() < deadline:
         seen = "healthy"; break
     if "ThingsOS_rescue" in text:
         seen = "rescue"; break
+    # The app already presenting frames also proves it booted fine.
+    if "ThingsOS_perf: Present total" in text or "ThingsOS_reader: UI layout" in text:
+        seen = "healthy"; break
 try:
     s.close()
 except Exception:
