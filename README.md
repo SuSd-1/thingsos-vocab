@@ -18,8 +18,49 @@
 - **记忆曲线**：FSRS-6（可切经典模式），目标保持率可调；
 - **离线发音**：Piper 生成的单词与例句 MP3，进屏自动朗读，可点按重播；
 - **底栏与统计**：「我的」页显示今日/累计词数与学习时长；
-- **设置页**：每日新词目标、复习上限、每组词数、保持率、算法、乱序、自动发音、答错处理、清空进度；
+- **设置页**：每日新词目标、每组词数、目标保持率、学习算法、随机选词、自动发音、朗读例句、答错处理；
 - **断点续学**：退出再进从组内原位继续。
+
+## 安装方式
+
+### 方式 A：直接刷完整应用包（普通用户）
+
+从 [Releases](https://github.com/SuSd-1/thingsos-vocab/releases) 下载 `ThingsOS_native.bin`，刷到 `0x220000`：
+
+```bash
+esptool --chip esp32s31 -p /dev/cu.usbmodem101 -b 460800 \
+  --before default-reset --after hard-reset \
+  write-flash 0x220000 ThingsOS_native.bin
+```
+
+> **前提**：设备已经刷入对应版本的原版 ThingsOS（本包基于 **ThingsOS 0.2.0**）。
+> 不要把它刷到 `0x0`，也不要覆盖救援分区。
+
+发布命名规则：
+
+```
+ThingsOS v0.2.0 Vocab v0.0.1   ← 本次
+ThingsOS v0.2.0 Vocab v0.0.2   ← 下一次
+```
+
+### 方式 B：打入补丁自行编译（开发者）
+
+```bash
+git checkout -b my-build upstream/0.2.0
+git am patches/*.patch
+```
+
+详见 [docs/UPGRADE.md](docs/UPGRADE.md)。
+
+### 词库与发音
+
+仓库**不包含**词库与发音文件（体积与版权原因），只保留 10 词样例。
+请按 [docs/VOCAB-DATA.md](docs/VOCAB-DATA.md) 用你自己的词表生成 `bank.bin` 与音频。
+
+### 建议接入 Agent 使用
+
+安装固件、导入词库、按需修改（界面/刷新策略/学习流程）都建议交给 Agent 完成：
+把本仓库与设备串口交给 Agent，可直接完成构建、刷机、导入词库与代码调整。
 
 ## 快速开始
 
