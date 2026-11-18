@@ -84,6 +84,9 @@ git am patches/*.patch
 仓库**不包含**词库与发音文件（体积与版权原因），只保留 10 词样例。
 请按 [docs/VOCAB-DATA.md](docs/VOCAB-DATA.md) 用你自己的词表生成 `bank.bin` 与音频。
 
+> **刷完看到「救援系统 / rescue」？** 这是防变砖保护：连续 3 次启动未确认就会进入。
+> 请**彻底断电（拔 USB）等 3 秒再上电一次**，不要连续多次复位；主应用分区没有损坏。
+>
 > **访达看不到 `.thingsos`？** 点文件夹名以 `.` 开头的目录默认隐藏：
 > 在访达里按 **⌘ + ⇧ + .**（Command+Shift+句号）显示隐藏文件；
 > 或直接用终端：`open /Volumes/<你的SD卡名>/.thingsos/vocab`。

@@ -11,6 +11,7 @@ TAG=""
 PORT=""
 DRY_RUN=0
 ASSUME_YES=0
+CHECK_HEALTH=1
 CHIP="esp32s31"
 ADDR="0x220000"
 
@@ -20,6 +21,7 @@ while [ $# -gt 0 ]; do
     --tag) TAG="${2:-}"; shift 2 ;;
     --dry-run) DRY_RUN=1; shift ;;
     --yes) ASSUME_YES=1; shift ;;
+    --no-health) CHECK_HEALTH=0; shift ;;
     -h|--help) sed -n '2,8p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
@@ -102,8 +104,54 @@ $ESPTOOL --chip "$CHIP" -p "$PORT" -b 460800 \
   write-flash "$ADDR" "$TMP/ThingsOS_native.bin"
 
 say ""
+if [ "$CHECK_HEALTH" = "1" ] && python3 -c 'import serial' >/dev/null 2>&1; then
+  say "waiting for the app to confirm health (up to 30s) ..."
+  RESULT=$(python3 - "$PORT" <<'PYHEALTH'
+import sys, time
+import serial
+port = sys.argv[1]
+try:
+    s = serial.Serial(port, 115200, timeout=0.3)
+except Exception:
+    print("skip"); raise SystemExit(0)
+deadline = time.time() + 30
+seen = "none"
+while time.time() < deadline:
+    try:
+        data = s.read(4096)
+    except Exception:
+        break
+    if not data:
+        continue
+    text = data.decode("utf-8", "replace")
+    if "Startup health confirmed" in text:
+        seen = "healthy"; break
+    if "ThingsOS_rescue" in text:
+        seen = "rescue"; break
+try:
+    s.close()
+except Exception:
+    pass
+print(seen)
+PYHEALTH
+)
+  case "$RESULT" in
+    healthy) say "boot health: confirmed (display / font / touch)" ;;
+    rescue)
+      say ""
+      say "!! 设备进入了救援系统（连续 3 次未确认启动）。"
+      say "!! 通常是因为短时间内反复复位。请彻底断电（拔掉 USB）等 3 秒再上电一次，"
+      say "!! 不要连续多次复位，也不要立刻重刷。"
+      ;;
+    *) say "boot health: not observed (device may still be booting); check the screen." ;;
+  esac
+else
+  say "boot health: skipped"
+fi
+say ""
 say "done. next steps:"
 say "  1) put bank.bin and audio/ into /sdcard/.thingsos/vocab/ (see docs/VOCAB-DATA.md)"
 say "  2) Finder hides dot-folders: press Cmd+Shift+. to show .thingsos,"
 say "     or use Terminal: open /Volumes/<SD>/.thingsos/vocab"
 say "  3) to keep progress, do not run erase-flash; app-only flashing preserves SD and NVS."
+say "  4) if the screen shows the rescue system, unplug power for 3s and plug it back in once."
