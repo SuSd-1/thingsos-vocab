@@ -116,6 +116,13 @@ bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus)
 bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage);
 bool vocab_answer(uint32_t now_min, vocab_grade_t grade);
 bool vocab_undo(uint32_t now_min);
+/* UI undo helpers: keep the original answer (cancel) or replace it. */
+bool vocab_undo_cancel(uint32_t now_min);
+/* Rebuild the current group when it has not started yet (settings change). */
+bool vocab_replan_idle(uint32_t now_min);
+/* Replace the grade of an already answered card (undo -> 改判). */
+bool vocab_regrade_by_id(uint32_t now_min, uint32_t id, vocab_grade_t grade);
+bool vocab_undo_regrade(uint32_t now_min, vocab_grade_t grade);
 bool vocab_stats(uint32_t now_min, vocab_stats_t *out);
 bool vocab_audio_path(uint32_t id, char *buf, size_t bytes);
 bool vocab_example_audio_path(uint32_t id, char *buf, size_t bytes);
@@ -134,6 +141,9 @@ bool vocab_plan_progress(uint16_t *group, uint8_t *round, uint8_t *index, uint8_
                          uint8_t *phase);
 /* Three meaning strings that are plausibly confusable with `id`. */
 bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]);
+/* Distractors plus the word each meaning belongs to (for the quiz reveal). */
+bool vocab_distractors_ex(uint32_t id, char means[3][VOCAB_MEANING_BYTES],
+                          char words[3][VOCAB_WORD_BYTES]);
 
 /* Settings. */
 void vocab_config_defaults(vocab_config_t *cfg);

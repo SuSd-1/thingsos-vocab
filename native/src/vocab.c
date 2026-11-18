@@ -20,6 +20,7 @@
 
 #ifdef ESP_PLATFORM
 #include "esp_heap_caps.h"
+#include "esp_random.h"
 #include "esp_log.h"
 #define VOCAB_LOG(...) ESP_LOGI("vocab", __VA_ARGS__)
 static void *vocab_alloc(size_t count, size_t size) {
@@ -71,10 +72,14 @@ typedef struct {
 
 typedef struct {
     uint32_t id;
-    vocab_state_record_t record;
+    vocab_state_record_t record;   /* state before the answer */
     uint32_t queue_pos;
     uint16_t new_today;
     uint16_t reviews_today;
+    vocab_state_record_t after;    /* state right after the answer */
+    uint32_t after_pos;
+    uint16_t after_new_today;
+    uint16_t after_reviews_today;
 } vocab_undo_t;
 
 _Static_assert(sizeof(vocab_state_record_t) == 28, "state record layout");
@@ -236,6 +241,7 @@ bool vocab_config_save(const char *root, const vocab_config_t *cfg) {
     raw[12] = cfg->error_mode;
     raw[13] = cfg->shuffle ? 1 : 0;
     raw[14] = cfg->auto_example ? 1 : 0;
+    raw[15] = 0;
     uint32_t crc = crc32_bytes(raw, 16);
     memcpy(raw + 16, &crc, 4);
     FILE *f = fopen(path, "wb");
@@ -722,23 +728,108 @@ static void plan_build_cards(const uint32_t *ids, unsigned count, uint8_t phase,
     g_plan_hdr.pos = 0;
 }
 
+/* ---------------------------------------------------------------- order */
+/* One fixed shuffle per word book. Only the 32-bit seed is persisted, so the
+   same order comes back after reboots and after toggling 正序/乱序. */
+#define ORDER_MAGIC 0x44524f56u /* "VORD" */
+typedef struct {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t count;
+    uint32_t seed;
+    uint32_t crc;
+} order_hdr_t;
+
+static uint32_t g_order_seed;
+static bool g_order_ready;
+
+static bool order_seed_load(void) {
+    char path[256];
+    path_of(path, sizeof(path), "order.dat");
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    order_hdr_t hdr;
+    const bool ok = fread(&hdr, 1, sizeof(hdr), f) == sizeof(hdr);
+    fclose(f);
+    if (!ok || hdr.magic != ORDER_MAGIC || hdr.version != VOCAB_VERSION) return false;
+    if (hdr.count != g_count || hdr.seed == 0) return false;
+    uint32_t check = hdr.crc;
+    order_hdr_t copy = hdr;
+    copy.crc = 0;
+    if (crc32_bytes(&copy, sizeof(copy)) != check) return false;
+    g_order_seed = hdr.seed;
+    return true;
+}
+
+static void order_seed_save(void) {
+    char path[256];
+    path_of(path, sizeof(path), "order.dat");
+    order_hdr_t hdr = {ORDER_MAGIC, VOCAB_VERSION, g_count, g_order_seed, 0};
+    hdr.crc = crc32_bytes(&hdr, sizeof(hdr) - sizeof(hdr.crc));
+    FILE *f = fopen(path, "wb");
+    if (!f) return;
+    fwrite(&hdr, 1, sizeof(hdr), f);
+    fflush(f);
+    fclose(f);
+}
+
+static uint32_t order_seed_get(void) {
+    if (g_order_ready) return g_order_seed;
+    g_order_ready = true;
+    if (!order_seed_load()) {
+#ifdef ESP_PLATFORM
+        g_order_seed = esp_random();
+#else
+        g_order_seed = (uint32_t)rand() * 2654435761u;
+#endif
+        if (g_order_seed == 0) g_order_seed = 0x9e3779b9u;
+        order_seed_save();
+        VOCAB_LOG("random order generated: seed=%08x", (unsigned)g_order_seed);
+    }
+    return g_order_seed;
+}
+
+/* Positions 0..count-1 in the book's fixed shuffled order. */
+static bool order_next_perm(uint32_t *perm, uint32_t count, uint32_t seed) {
+    if (!perm || !count) return false;
+    for (uint32_t i = 0; i < count; i++) perm[i] = i;
+    uint32_t s = seed ? seed : 0x9e3779b9u;
+    for (uint32_t i = count; i > 1; i--) {
+        s ^= s << 13;
+        s ^= s >> 17;
+        s ^= s << 5;
+        const uint32_t j = s % i;
+        const uint32_t tmp = perm[i - 1];
+        perm[i - 1] = perm[j];
+        perm[j] = tmp;
+    }
+    return true;
+}
+
 /* Cards in the given states, in bank order, that are due now. */
 static unsigned plan_collect(uint8_t state_a, uint8_t state_b, uint32_t now_min,
                              uint32_t *out, unsigned max) {
     unsigned n = 0;
+    /* Random word selection: walk the book's fixed shuffled order, so new
+       words come from all over the book instead of its first pages. */
+    if (g_config.shuffle && state_a == VOCAB_STATE_NEW && g_count) {
+        uint32_t *perm = vocab_alloc(g_count, sizeof(uint32_t));
+        if (perm && order_next_perm(perm, g_count, order_seed_get())) {
+            for (uint32_t k = 0; k < g_count && n < max; k++) {
+                const uint32_t i = perm[k];
+                const vocab_state_record_t *record = &g_records[i];
+                if (record->state != state_a && record->state != state_b) continue;
+                out[n++] = i;
+            }
+        }
+        free(perm);
+        if (n) return n;
+    }
     for (uint32_t i = 0; i < g_count && n < max; i++) {
         const vocab_state_record_t *record = &g_records[i];
         if (record->state != state_a && record->state != state_b) continue;
         if (state_a != VOCAB_STATE_NEW && record->due_min && record->due_min > now_min) continue;
         out[n++] = i;
-    }
-    if (g_config.shuffle) {
-        for (unsigned i = n; i > 1; i--) {
-            const unsigned j = (unsigned)(rand() % i);
-            const uint32_t tmp = out[i - 1];
-            out[i - 1] = out[j];
-            out[j] = tmp;
-        }
     }
     return n;
 }
@@ -994,7 +1085,81 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
             plan_save();
         }
     }
+    if (g_undo_count) {
+        vocab_undo_t *undo = &g_undo[(g_undo_count - 1) % VOCAB_UNDO_DEPTH];
+        undo->after = g_records[undo->id];
+        undo->after_pos = g_plan_hdr.pos;
+        undo->after_new_today = g_new_today;
+        undo->after_reviews_today = g_reviews_today;
+    }
     g_current_valid = false;
+    return true;
+}
+
+bool vocab_replan_idle(uint32_t now_min) {
+    if (!g_open || !g_plan || g_plan_hdr.pos != 0) return false;
+    if (g_focus == 1) return plan_build_learn(now_min);
+    if (g_focus == 2) return plan_build_review(now_min);
+    return false;
+}
+
+bool vocab_undo_cancel(uint32_t now_min) {
+    (void)now_min;
+    if (!g_open || !g_undo_count) return false;
+    vocab_undo_t *undo = &g_undo[(g_undo_count - 1) % VOCAB_UNDO_DEPTH];
+    g_records[undo->id] = undo->after;
+    if (g_plan) {
+        g_plan_hdr.pos = (uint16_t)undo->after_pos;
+        plan_save();
+    }
+    g_new_today = undo->after_new_today;
+    g_reviews_today = undo->after_reviews_today;
+    g_current = undo->id;
+    g_current_valid = true;
+    g_undo_count--;
+    return true;
+}
+
+bool vocab_undo_regrade(uint32_t now_min, vocab_grade_t grade) {
+    if (!g_open || !g_undo_count) return false;
+    vocab_undo_t *undo = &g_undo[(g_undo_count - 1) % VOCAB_UNDO_DEPTH];
+    g_records[undo->id] = undo->record;
+    if (g_plan) {
+        g_plan_hdr.pos = (uint16_t)undo->queue_pos;
+        if (g_plan_hdr.pos < g_plan_hdr.len) g_plan[g_plan_hdr.pos].flags = 0;
+    }
+    g_new_today = undo->new_today;
+    g_reviews_today = undo->reviews_today;
+    g_current = undo->id;
+    g_current_valid = true;
+    g_undo_count--;
+    char path[256];
+    journal_path(path, sizeof(path));
+    FILE *f = fopen(path, "rb+");
+    if (f) {
+        if (fseek(f, -(long)VOCAB_JOURNAL_ENTRY, SEEK_END) == 0) {
+            unsigned char zero[VOCAB_JOURNAL_ENTRY] = {0};
+            fwrite(zero, 1, sizeof(zero), f);
+            fflush(f);
+        }
+        fclose(f);
+    }
+    return vocab_answer(now_min, grade);
+}
+
+bool vocab_regrade_by_id(uint32_t now_min, uint32_t id, vocab_grade_t grade) {
+    if (!g_open || id >= g_count) return false;
+    int found = -1;
+    for (unsigned k = 0; k < g_undo_count && k < VOCAB_UNDO_DEPTH; k++) {
+        const unsigned idx = (g_undo_count - 1 - k) % VOCAB_UNDO_DEPTH;
+        if (g_undo[idx].id == id) { found = (int)idx; break; }
+    }
+    if (found < 0) return false;
+    vocab_state_record_t pre = g_undo[found].record;
+    g_records[id] = pre;
+    schedule_record(&g_records[id], grade, now_min, &g_config);
+    journal_append(id, &g_records[id]);
+    plan_save();
     return true;
 }
 
@@ -1174,7 +1339,8 @@ uint8_t vocab_current_level(void) {
 }
 
 /* Deterministic distractors: same-ish meaning length, different first glyph. */
-bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]) {
+static bool distractors_impl(uint32_t id, char out[3][VOCAB_MEANING_BYTES],
+                             char words[3][VOCAB_WORD_BYTES]) {
     if (!out || !g_count || id >= g_count) return false;
     vocab_index_t self;
     if (!read_index(id, &self)) return false;
@@ -1197,6 +1363,7 @@ bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]) {
             if (!strcmp(out[k], meaning)) dup = true;
         if (dup) continue;
         snprintf(out[found], VOCAB_MEANING_BYTES, "%s", meaning);
+        if (words) read_string(other.word_off, words[found], VOCAB_WORD_BYTES);
         found++;
     }
     for (uint32_t step = 1; step < g_count && found < 3 && step < 24; step++) {
@@ -1212,9 +1379,19 @@ bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]) {
             if (!strcmp(out[k], meaning)) dup = true;
         if (dup) continue;
         snprintf(out[found], VOCAB_MEANING_BYTES, "%s", meaning);
+        if (words) read_string(other.word_off, words[found], VOCAB_WORD_BYTES);
         found++;
     }
     return found == 3;
+}
+
+bool vocab_distractors(uint32_t id, char out[3][VOCAB_MEANING_BYTES]) {
+    return distractors_impl(id, out, NULL);
+}
+
+bool vocab_distractors_ex(uint32_t id, char means[3][VOCAB_MEANING_BYTES],
+                          char words[3][VOCAB_WORD_BYTES]) {
+    return distractors_impl(id, means, words);
 }
 
 bool vocab_export_log(const char *path) {
