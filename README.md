@@ -79,6 +79,17 @@ git am patches/*.patch
 
 详见 [docs/UPGRADE.md](docs/UPGRADE.md)。
 
+### 一键导入自己的词书
+
+```bash
+./vocab-kit/scripts/import-wordbook.sh 我的词书.xlsx --jobs 4
+```
+
+自动完成：解析 Excel → 补音标/例句 → 生成发音 → 打包 `bank.bin`。
+可选 `--no-audio`、`--to-sd /Volumes/<SD>`、`--tatoeba <语料>`。
+
+Agent 所需环境与检查清单见 [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)。
+
 ### 词库与发音
 
 仓库**不包含**词库与发音文件（体积与版权原因），只保留 10 词样例。

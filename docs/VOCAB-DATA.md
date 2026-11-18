@@ -17,7 +17,15 @@
 
 示例见 [`samples/wordbook-sample.csv`](../samples/wordbook-sample.csv)。
 
-## 从 Excel 导入
+## 一键导入（推荐）
+
+```bash
+./vocab-kit/scripts/import-wordbook.sh 我的词书.xlsx --jobs 4
+```
+
+自动准备 venv、依赖与音色，跑完导入/发音/打包；产出一份可直接拷到 SD 的目录。
+
+## 从 Excel 导入（手动步骤）
 
 ```bash
 ~/.venvs/piper/bin/python vocab-kit/tools/import_xlsx.py \
