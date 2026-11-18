@@ -1,0 +1,18 @@
+# ThingsOS Metalio v0.2.0 Vocab
+
+> ESP32-S31 电子墨水单词卡固件（背单词应用），基于 ThingsOS Metalio v0.2.0。
+
+- 仓库: https://github.com/SuSd-1/thingsos-vocab
+- 发布包: https://github.com/SuSd-1/thingsos-vocab/releases
+- Agent 操作规范: ./AGENTS.md
+- 给 Agent 的安装提示词: ./docs/AGENT-PROMPT.md
+- 环境与依赖: ./docs/AGENT-SETUP.md
+- 词库数据格式: ./docs/VOCAB-DATA.md
+- 升级与补丁: ./docs/UPGRADE.md
+
+## 安装摘要
+
+1. 前提：设备已刷原版 ThingsOS Metalio v0.2.0。
+2. 运行：./vocab-kit/scripts/install-release.sh --yes --port <PORT>
+3. 成功：boot health: confirmed
+4. 词库：./vocab-kit/scripts/import-wordbook.sh <xlsx> --to-sd /Volumes/<SD>

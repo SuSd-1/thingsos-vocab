@@ -1,3 +1,9 @@
+> **如果你是 Agent，或想用 Agent 安装**：请先读 [AGENTS.md](AGENTS.md)
+> 与 [docs/AGENT-PROMPT.md](docs/AGENT-PROMPT.md)（可整段复制的提示词）。
+> 一句话流程：确认设备已刷原版 **ThingsOS Metalio v0.2.0** →
+> `./vocab-kit/scripts/install-release.sh --yes --port <PORT>` →
+> 看到 `boot health: confirmed` 即成功。
+
 # 背单词（Vocabulary）— ThingsOS 电子墨水单词卡应用
 
 这是 [ThingsOS](https://github.com/MindReset/read_pico_firmware) `0.2.0` 的一个分支，
