@@ -516,7 +516,10 @@ static void app_poll(void){
             app_media.preview=false;
         }
         if(current.state==THINGSOS_AUDIO_IDLE){app_audio_scan(true);if(app_media.preview)app_media.preview=false;
-            if(current.ended&&app_media.playlist&&app_media.music_count){
+            /* Only a finished *music* track advances the playlist; the vocab
+               app also plays audio, and its end must not skip songs. */
+            if(current.ended&&app_media.playlist&&app_media.music_count&&
+               strstr(current.path,"/music/")){
                 if(app_media.play_mode==2)app_music_select(app_media.selected);
                 else if(app_media.selected+1<app_media.music_count||app_media.play_mode==1)app_music_step(1);
             }}
