@@ -205,6 +205,7 @@ static void haptic_off(void* unused){(void)unused;metalio_motor(false);}
 /* 上电复用：更新后电源轨保持窗口。/ Rail keepalive window after a frame. */
 static esp_timer_handle_t power_idle;
 static bool rails_kept;
+static unsigned ui_rows_first, ui_rows_count;
 static bool static_page;
 void thingsos_board_static_page(bool enabled){static_page=enabled;}
 static void power_idle_off(void* unused){(void)unused;
@@ -412,7 +413,9 @@ static esp_err_t present(const thingsos_canvas_t* c, bool reader, unsigned keybo
          : status && !clean ? thingsos_panel_pack_rows(c,fb,THINGSOS_PANEL_BYTES,monochrome,0,74)
          : editor_frame && !clean
            ? keyboard_pack(c,fb,monochrome,keyboard==1,keyboard==6)
-           : thingsos_panel_pack(c,fb,THINGSOS_PANEL_BYTES,monochrome)));
+           : ui_rows_count
+             ? thingsos_panel_pack_rows(c,fb,THINGSOS_PANEL_BYTES,monochrome,ui_rows_first,ui_rows_count)
+             : thingsos_panel_pack(c,fb,THINGSOS_PANEL_BYTES,monochrome)));
     if (!packed) {
         /* Safe generic fallback if a future BSP uses a different layout. */
         for (int y = 0; y < (status && !clean ? 74 : c->height); y++) {
@@ -505,7 +508,10 @@ static esp_err_t present(const thingsos_canvas_t* c, bool reader, unsigned keybo
         ui_black_corrected=thingsos_refresh_ui_corrected(refresh_mode,corrected_ready);
         epd_hl_waveform(&hl,refresh_mode==1?thingsos_panel_fast_waveform()
                                            :ui_black_corrected?&corrected_waveform:panel_wave);
-        e=epd_hl_update_screen_full(&hl,mode,(int)temperature);
+        e = ui_rows_count
+                ? epd_hl_update_area_full(&hl,mode,(int)temperature,
+                                          (EpdRect){0,(int)ui_rows_first,epd_width(),(int)ui_rows_count})
+                : epd_hl_update_screen_full(&hl,mode,(int)temperature);
         epd_hl_waveform(&hl,panel_wave);
         ESP_LOGI("ThingsOS_board","UI low-flash %s: full-pixel white maintenance tab_cleanup=%d black_corrected=%d result=0x%x",
             refresh_mode==1?"DU":"GC16",ui_cleanup,ui_black_corrected,(unsigned)e);
@@ -736,6 +742,47 @@ esp_err_t thingsos_board_present_reader_background(const thingsos_canvas_t* c) {
     esp_err_t result=present(c,true,false,false,false);
     reader_background=false;
     return result;
+}
+esp_err_t thingsos_board_present_ui_rows(const thingsos_canvas_t* c,unsigned y,unsigned h) {
+    if(!c||h==0||y+h>1216u)return ESP_ERR_INVALID_ARG;
+    ui_rows_first=y;ui_rows_count=h;
+    esp_err_t e=present(c,false,false,false,false);
+    ui_rows_first=ui_rows_count=0;
+    return e;
+}
+esp_err_t thingsos_board_present_region(const thingsos_canvas_t* c,int x,int y,int w,int h) {
+    if(!ready||!c||!c->pixels||c->width!=684||c->height!=1216)return ESP_ERR_INVALID_STATE;
+    if(x<0||y<0||w<=0||h<=0||x>c->width-w||y>c->height-h)return ESP_ERR_INVALID_ARG;
+    uint8_t* fb=epd_hl_get_framebuffer(&hl);
+    if(rails_kept){esp_timer_stop(power_idle);rails_kept=false;}
+    epd_poweron();
+    if(!metalio_rails_on()) {
+        epd_poweroff();
+        vTaskDelay(pdMS_TO_TICKS(100));
+        epd_poweron();
+        if(!metalio_rails_on()){epd_poweroff();return ESP_FAIL;}
+    }
+    EpdRect area={(int)x,(int)y,(int)w,(int)h};
+    const size_t stride=THINGSOS_PANEL_BYTES/1216u;
+    int64_t started=esp_timer_get_time();
+    /* Mirror the full-frame pipeline: white maintenance over the region first,
+       then the content. Without the maintenance pass the refreshed row settles
+       at a different black than the rest of the page. */
+    memset(fb+(size_t)y*stride,0xFF,(size_t)h*stride);
+    enum EpdDrawError clean=epd_hl_update_area(&hl,MODE_GC16,25,area);
+    if(!thingsos_panel_pack_rows(c,fb,THINGSOS_PANEL_BYTES,false,y,h)) {
+        epd_poweroff();
+        return ESP_FAIL;
+    }
+    enum EpdDrawError e=(clean==EPD_DRAW_SUCCESS)
+        ? epd_hl_update_area(&hl,MODE_GC16,25,area) : clean;
+    ESP_LOGI("ThingsOS_board","Region GC16 %dx%d: %lld ms clean=0x%x result=0x%x",w,h,
+             (long long)((esp_timer_get_time()-started)/1000),(unsigned)clean,(unsigned)e);
+    esp_timer_stop(power_idle);
+    epd_poweroff();
+    esp_err_t idle=metalio_panel_idle_verify();
+    if(idle!=ESP_OK)return idle;
+    return e==EPD_DRAW_SUCCESS?ESP_OK:ESP_FAIL;
 }
 esp_err_t thingsos_board_present_metrics(const thingsos_canvas_t* c) {
     /* Reuse changed-row / equal-pixel hold maintenance. Keep the gray tracks

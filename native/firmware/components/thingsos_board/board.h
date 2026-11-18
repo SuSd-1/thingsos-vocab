@@ -59,6 +59,12 @@ void thingsos_board_healthy(void);
 bool thingsos_board_time(uint32_t*);
 esp_err_t thingsos_board_set_time(uint32_t);
 void thingsos_board_full_refresh(void);
+/* Fast regional refresh: packs only the rows of the rectangle and drives it
+   with the low-flash waveform instead of a full GC16 frame. */
+esp_err_t thingsos_board_present_region(const thingsos_canvas_t* canvas, int x, int y, int w, int h);
+/* Same pipeline as a full UI frame (waveform, white maintenance, black
+   correction) but restricted to rows [y, y+h). */
+esp_err_t thingsos_board_present_ui_rows(const thingsos_canvas_t* canvas, unsigned y, unsigned h);
 void thingsos_board_transition_refresh(void);
 /* Next frame: drive equal pixels inside this portrait rectangle as well.
    No-op on this board: every non-reader frame already drives all pixels. */

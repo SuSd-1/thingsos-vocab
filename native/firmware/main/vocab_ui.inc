@@ -9,6 +9,8 @@
  */
 #include "thingsos/vocab.h"
 #include "esp_timer.h"
+#include "esp_heap_caps.h"
+#include "thingsos/display_buffer.h"
 
 #define VOCAB_UX_MINUTES_2020 26297280u
 #define VOCAB_OPTION_ROWS 4
@@ -28,9 +30,16 @@ typedef enum {
 } vocab_phase_t;
 
 static uint8_t vu_chain_example;
+static bool vu_region_pending;
+static int vu_region_x, vu_region_y, vu_region_w, vu_region_h;
 static uint64_t vu_time_last_us;
 static uint32_t vu_time_pending_ms;
 static bool vu_confirm_clear;
+static bool vu_full_requested;
+static uint8_t vu_pending_audio;
+static bool vu_hint_valid;
+static int vu_hint_y, vu_hint_h;
+static uint8_t vu_region_count;
 static uint32_t vu_history[8];
 static uint8_t vu_hist_count, vu_hist_pos;
 static bool vu_peeking;
@@ -244,6 +253,28 @@ static void vocab_build_quiz(void) {
 
 /* Spoken word on every learning/review screen; stops any running audio first so
    pronunciation never layers over the music player or a previous take. */
+/* Presentation: one clean full-frame refresh per changed screen. The earlier
+   regional experiment used thingsos_board_present_audio_diff_clean(), which
+   still scans full GC16 phases over the band (935 ms) and leaves text lighter;
+   a真正轻量的 DU/GL16 区域接口在 board 层实现后再启用。 */
+static esp_err_t vocab_region_present(const thingsos_canvas_t* canvas) {
+    const unsigned every = app.ui_refresh_pages ? app.ui_refresh_pages : 15;
+    if (!vu_full_requested && vu_hint_valid && vu_region_count + 1u < every) {
+        const unsigned y = (unsigned)vu_hint_y, h = (unsigned)vu_hint_h;
+        vu_hint_valid = false;
+        if (thingsos_board_present_ui_rows(canvas, y, h) == ESP_OK) {
+            vu_region_count++;
+            return ESP_OK;
+        }
+    }
+    vu_hint_valid = false;
+    vu_full_requested = false;
+    vu_region_count = 0;
+    return thingsos_board_present(canvas);
+}
+
+static void vocab_note_full_refresh(void) { vu_full_requested = true; }
+
 static void vocab_play_file(const char* path) {
     if (!path || !*path) return;
     thingsos_audio_play(path, 0);
@@ -290,6 +321,10 @@ static void vocab_play_stage_audio(void) {
    example sentence so the answer page reads "word, then sentence". */
 static void vocab_audio_tick(void) {
     vocab_time_tick();
+    if (vu_pending_audio) {
+        vu_pending_audio = 0;
+        vocab_play_stage_audio();
+    }
     if (!vu_chain_example || app.page != THINGSOS_UI_VOCAB) return;
     thingsos_audio_status_t status;
     thingsos_audio_status(&status);
@@ -301,6 +336,7 @@ static void vocab_audio_tick(void) {
 }
 
 static bool vocab_load_next(void) {
+    vu_region_pending = false;
     vu_peeking = false;
     vu_chain_example = 0;
     vu.revealed = false;
@@ -405,7 +441,7 @@ static void vocab_submit(vocab_grade_t grade) {
         return;
     }
     vu.phase = VOCAB_PHASE_ANSWER;
-    vocab_play_stage_audio();
+    vu_pending_audio = 1;   /* played from the loop after this frame is shown */
     {
         char example[256];
         vu_chain_example = (vu.config.auto_example &&
@@ -624,6 +660,7 @@ static void vocab_draw_quiz(void) {
 
 static void vocab_draw_recall(void) {
     vocab_draw_round_progress();
+    vocab_undo_icon();
     vocab_header(vu.screen == VOCAB_SCREEN_REVIEW ? "复习" : "学习");
     label(vu.card.word, 36, 258, 64, 612);
     if (vu.card.phonetic[0]) {
@@ -659,6 +696,11 @@ static void vocab_draw_done(void) {
 }
 
 static bool vocab_draw(void) {
+    if (app.force_refresh) vu_full_requested = true;
+    /* Follow the system font size, clamped so the fixed card geometry never
+       overlaps: 85%..115% of the design size. */
+    if (app.font.ui_size_percent > 115) app.font.ui_size_percent = 115;
+    if (app.font.ui_size_percent < 85) app.font.ui_size_percent = 85;
     if (app.page != THINGSOS_UI_VOCAB) {
         if (vu.started) vocab_stop();
         return false;
@@ -806,6 +848,9 @@ static bool vocab_tap(int x, int y) {
             }
             if (save) vocab_config_save("/sdcard", &vu.config);
             app.dirty = true;
+            vu_hint_valid = true;
+            vu_hint_y = 200 + row * 70 - 6;
+            vu_hint_h = 96;
             return true;
         }
         return true;

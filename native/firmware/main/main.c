@@ -4135,7 +4135,9 @@ void app_main(void) {
             }
             reader_cache_output_begin();
             thingsos_board_static_page(ui_static_panel_page());
-            e = app.lock_wave_pending ? present_lock_transition() : pin_region?thingsos_board_present_pin_input(&app.canvas):loading_region?online_modal_present_card():system_region?app_system_present():audio_region?app_audio_present():cubox_region?app_cubox_present():app.feedback_refresh
+            e = (app.page == THINGSOS_UI_VOCAB)
+                ? vocab_region_present(&app.canvas)
+                : app.lock_wave_pending ? present_lock_transition() : pin_region?thingsos_board_present_pin_input(&app.canvas):loading_region?online_modal_present_card():system_region?app_system_present():audio_region?app_audio_present():cubox_region?app_cubox_present():app.feedback_refresh
                 ? (app.page==THINGSOS_UI_READING?thingsos_board_present_reader_background(&app.canvas):thingsos_board_present(&app.canvas))
                 : app.controls_open || app.controls_refresh
                 ? thingsos_board_present_controls(&app.canvas)
