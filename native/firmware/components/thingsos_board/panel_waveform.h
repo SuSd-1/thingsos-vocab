@@ -34,6 +34,8 @@
 /// Waveform used by clean/full and masked panel updates on this board. Never
 /// NULL: if a mode is missing it falls back to the trimmed `E0470_WAVEFORM`.
 const EpdWaveform* thingsos_panel_waveform(void);
+/* 8-gray 30-phase table (faster, fewer gray levels). */
+const EpdWaveform* thingsos_panel_gray8_waveform(void);
 
 /// Page-turn waveform (trimmed GC16 36 / GL16 37 + threshold DU). Falls back to
 /// thingsos_panel_waveform() when the trimmed modes are unavailable.

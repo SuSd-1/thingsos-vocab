@@ -65,6 +65,13 @@ esp_err_t thingsos_board_present_region(const thingsos_canvas_t* canvas, int x, 
 /* Same pipeline as a full UI frame (waveform, white maintenance, black
    correction) but restricted to rows [y, y+h). */
 esp_err_t thingsos_board_present_ui_rows(const thingsos_canvas_t* canvas, unsigned y, unsigned h);
+/* UI refresh tiers: 0 fast (GRAY8 30 phases), 1 balanced (trimmed GC16 36),
+   2 clear (full GC16 48). */
+esp_err_t thingsos_board_present_ui_mode(const thingsos_canvas_t* canvas, unsigned mode);
+/* Full-screen DU update for UI pages: shorter waveform, black/white only. */
+esp_err_t thingsos_board_present_ui_du(const thingsos_canvas_t* canvas);
+/* Banded UI update: DU-mode area scan, for small text changes. */
+esp_err_t thingsos_board_present_ui_band(const thingsos_canvas_t* canvas, unsigned y, unsigned h);
 void thingsos_board_transition_refresh(void);
 /* Next frame: drive equal pixels inside this portrait rectangle as well.
    No-op on this board: every non-reader frame already drives all pixels. */

@@ -160,6 +160,9 @@ const EpdWaveform* thingsos_panel_fast_waveform(void) {
     return &s_fast_waveform;
 }
 
+const EpdWaveform* thingsos_panel_gray8_waveform(void) {
+    return &E0470_GRAY8_WAVEFORM;
+}
 const EpdWaveform* thingsos_panel_turn_waveform(void) {
     if (s_turn_backed) return &s_turn_waveform;
     /* E0470_WAVEFORM already carries the supplier trim (GC16 36 / GL16 37) and

@@ -206,6 +206,8 @@ static void haptic_off(void* unused){(void)unused;metalio_motor(false);}
 static esp_timer_handle_t power_idle;
 static bool rails_kept;
 static unsigned ui_rows_first, ui_rows_count;
+static bool ui_du_requested;
+static unsigned ui_wave_mode = 0xFFu;
 static bool static_page;
 void thingsos_board_static_page(bool enabled){static_page=enabled;}
 static void power_idle_off(void* unused){(void)unused;
@@ -497,24 +499,54 @@ static esp_err_t present(const thingsos_canvas_t* c, bool reader, unsigned keybo
         e=epd_hl_update_screen_full(&hl,mode,(int)temperature);
         ESP_LOGI("ThingsOS_board","Static UI full GL16: vendor table result=0x%x",(unsigned)e);
     }
-    else if (ui_low_flash) {
-        /* Reuse the validated reading paths, including their equal-white
-           maintenance, for both home tabs and nested UI pages. Preserve gray
-           icons in balanced mode; do not turn navigation into a full clean.
-           Balanced mode uses the corrected table: leaving unchanged black
-           icons and labels undriven is the same uneven-ink defect the reader
-           saw inside one glyph. Fast mode stays on the DU view. */
-        mode=refresh_mode==1?MODE_DU:MODE_GC16;
-        ui_black_corrected=thingsos_refresh_ui_corrected(refresh_mode,corrected_ready);
-        epd_hl_waveform(&hl,refresh_mode==1?thingsos_panel_fast_waveform()
-                                           :ui_black_corrected?&corrected_waveform:panel_wave);
-        e = ui_rows_count
-                ? epd_hl_update_area_full(&hl,mode,(int)temperature,
-                                          (EpdRect){0,(int)ui_rows_first,epd_width(),(int)ui_rows_count})
-                : epd_hl_update_screen_full(&hl,mode,(int)temperature);
+    else if (ui_wave_mode != 0xFFu) {
+        const EpdWaveform* wave = ui_wave_mode == 0 ? thingsos_panel_gray8_waveform()
+                                : ui_wave_mode == 1 ? thingsos_panel_turn_waveform()
+                                                    : panel_wave;
+        epd_hl_waveform(&hl, wave);
+        int64_t tier_started = esp_timer_get_time();
+        /* Tiers 0/1 are the low-flash modes: GL16 drives only the changed
+           pixels (no white maintenance pass), so they do not flash the page
+           to black; the UI cleans with a full GC16 every few frames. */
+        e = epd_hl_update_screen(&hl, MODE_GL16, (int)temperature);
+        epd_hl_waveform(&hl, panel_wave);
+        ESP_LOGI("ThingsOS_board","UI tier %u: %lld ms result=0x%x",ui_wave_mode,
+                 (long long)((esp_timer_get_time()-tier_started)/1000),(unsigned)e);
+    }
+    else if (ui_du_requested) {
+        epd_hl_waveform(&hl,thingsos_panel_fast_waveform());
+        int64_t du_started=esp_timer_get_time();
+        e=epd_hl_update_screen_full(&hl,MODE_DU,(int)temperature);
         epd_hl_waveform(&hl,panel_wave);
-        ESP_LOGI("ThingsOS_board","UI low-flash %s: full-pixel white maintenance tab_cleanup=%d black_corrected=%d result=0x%x",
-            refresh_mode==1?"DU":"GC16",ui_cleanup,ui_black_corrected,(unsigned)e);
+        ESP_LOGI("ThingsOS_board","UI DU full: %lld ms result=0x%x",
+                 (long long)((esp_timer_get_time()-du_started)/1000),(unsigned)e);
+    }
+    else if (ui_rows_count>0) {
+        /* Same delivery as the status bar: default waveform, area-limited
+           full update so the refreshed rows get the identical black. */
+        mode=MODE_GC16;
+        epd_hl_waveform(&hl,panel_wave);
+        EpdRect row_area={(int)0,(int)ui_rows_first,epd_width(),(int)ui_rows_count};
+        e=epd_hl_update_area_full(&hl,mode,(int)temperature,row_area);
+        ESP_LOGI("ThingsOS_board","UI rows y=%u h=%u result=0x%x",ui_rows_first,ui_rows_count,(unsigned)e);
+    }
+    else if (ui_low_flash) {
+        if (refresh_mode == 1) {
+            /* Fast: threshold DU with the usual white-maintenance pass. */
+            mode=MODE_DU;
+            epd_hl_waveform(&hl,thingsos_panel_fast_waveform());
+            e=epd_hl_update_screen_full(&hl,MODE_DU,(int)temperature);
+            ui_black_corrected=0;
+        } else {
+            /* Balanced: trimmed GL16 table, differential drive (no flash). */
+            mode=MODE_GL16;
+            epd_hl_waveform(&hl,thingsos_panel_turn_waveform());
+            e=epd_hl_update_screen(&hl,MODE_GL16,(int)temperature);
+            ui_black_corrected=thingsos_refresh_ui_corrected(refresh_mode,corrected_ready);
+        }
+        epd_hl_waveform(&hl,panel_wave);
+        ESP_LOGI("ThingsOS_board","UI low-flash %s tab_cleanup=%d black_corrected=%d result=0x%x",
+            refresh_mode==1?"DU full":"trimmed GL16 diff",ui_cleanup,ui_black_corrected,(unsigned)e);
     }
     else if (clean || transition) {
         /* Vendor 2.0.76 conditions every page change with one all-pixel GC16,
@@ -746,9 +778,43 @@ esp_err_t thingsos_board_present_reader_background(const thingsos_canvas_t* c) {
 esp_err_t thingsos_board_present_ui_rows(const thingsos_canvas_t* c,unsigned y,unsigned h) {
     if(!c||h==0||y+h>1216u)return ESP_ERR_INVALID_ARG;
     ui_rows_first=y;ui_rows_count=h;
+    ESP_LOGI("ThingsOS_board","UI rows %u+%u",y,h);
     esp_err_t e=present(c,false,false,false,false);
     ui_rows_first=ui_rows_count=0;
     return e;
+}
+esp_err_t thingsos_board_present_ui_mode(const thingsos_canvas_t* c,unsigned mode) {
+    if(mode>2)return ESP_ERR_INVALID_ARG;
+    ui_wave_mode=mode;
+    esp_err_t e=present(c,false,false,false,false);
+    ui_wave_mode=0xFFu;
+    return e;
+}
+esp_err_t thingsos_board_present_ui_du(const thingsos_canvas_t* c) {
+    ui_du_requested=true;
+    esp_err_t e=present(c,false,false,false,false);
+    ui_du_requested=false;
+    return e;
+}
+esp_err_t thingsos_board_present_ui_band(const thingsos_canvas_t* c,unsigned y,unsigned h) {
+    if(!ready||!c||!c->pixels||c->width!=684||c->height!=1216)return ESP_ERR_INVALID_STATE;
+    if(h==0||y+h>1216u)return ESP_ERR_INVALID_ARG;
+    uint8_t* fb=epd_hl_get_framebuffer(&hl);
+    if(rails_kept){esp_timer_stop(power_idle);rails_kept=false;}
+    epd_poweron();
+    if(!metalio_rails_on()){epd_poweroff();return ESP_FAIL;}
+    if(!thingsos_panel_pack_rows(c,fb,THINGSOS_PANEL_BYTES,false,y,h)){epd_poweroff();return ESP_FAIL;}
+    epd_hl_waveform(&hl,thingsos_panel_fast_waveform());
+    int64_t started=esp_timer_get_time();
+    enum EpdDrawError e=epd_hl_update_area(&hl,MODE_DU,25,(EpdRect){0,(int)y,epd_width(),(int)h});
+    epd_hl_waveform(&hl,panel_wave);
+    esp_timer_stop(power_idle);
+    epd_poweroff();
+    esp_err_t idle=metalio_panel_idle_verify();
+    ESP_LOGI("ThingsOS_board","UI band y=%u h=%u: %lld ms result=0x%x",y,h,
+             (long long)((esp_timer_get_time()-started)/1000),(unsigned)e);
+    if(idle!=ESP_OK)return idle;
+    return e==EPD_DRAW_SUCCESS?ESP_OK:ESP_FAIL;
 }
 esp_err_t thingsos_board_present_region(const thingsos_canvas_t* c,int x,int y,int w,int h) {
     if(!ready||!c||!c->pixels||c->width!=684||c->height!=1216)return ESP_ERR_INVALID_STATE;
