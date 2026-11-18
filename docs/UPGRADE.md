@@ -1,4 +1,4 @@
-# 跟随上游 ThingsOS 升级
+# 跟随上游 ThingsOS Metalio 升级
 
 本项目基于 ThingsOS `0.2.0`，改动分两类：
 
@@ -50,7 +50,7 @@ git tag "thingsos-<版本>-vocab-v<x.y.z>"
 
 ```
 标题：ThingsOS v<上游版本> Vocab v<应用版本>
-例如：ThingsOS v0.2.0 Vocab v0.0.1
+例如：ThingsOS Metalio v0.2.0 Vocab v0.0.1
 ```
 
 软件包只包含 **app 镜像**（刷 `0x220000`），前提是设备已刷入对应的原版 ThingsOS。

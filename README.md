@@ -45,7 +45,7 @@ cd thingsos-vocab
 
 ```bash
 --port /dev/cu.usbmodem1101   # 指定串口
---tag thingsos-v0.2.0-vocab-v0.0.1
+--tag thingsos-metalio-v0.2.0-vocab-v0.0.1
 --dry-run                     # 只下载校验，不刷
 --yes                         # 不询问
 ```
@@ -60,14 +60,14 @@ esptool --chip esp32s31 -p /dev/cu.usbmodem101 -b 460800 \
   write-flash 0x220000 ThingsOS_native.bin
 ```
 
-> **前提**：设备已经刷入对应版本的原版 ThingsOS（本包基于 **ThingsOS 0.2.0**）。
+> **前提**：设备已经刷入对应版本的原版固件（本包基于 **ThingsOS Metalio v0.2.0**）。
 > 不要把它刷到 `0x0`，也不要覆盖救援分区。
 
 发布命名规则：
 
 ```
-ThingsOS v0.2.0 Vocab v0.0.1   ← 本次
-ThingsOS v0.2.0 Vocab v0.0.2   ← 下一次
+ThingsOS Metalio v0.2.0 Vocab v0.0.1   ← 本次
+ThingsOS Metalio v0.2.0 Vocab v0.0.2   ← 下一次
 ```
 
 ### 方式 B：打入补丁自行编译（开发者）
