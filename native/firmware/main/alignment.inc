@@ -663,10 +663,12 @@ static bool alignment_tap(int x, int y) {
         } else if(x>=228 && x<648 && y>=430 && y<530) {
             unsigned interval=5+5*((unsigned)(x-228)/105);
             app.ui_refresh_pages=interval;
+            thingsos_board_refresh_policy(app.ui_refresh_mode, app.ui_refresh_pages);
         } else if (x>=228 && y>=560 && y<790) {
             unsigned choice=x<368?0:x<508?1:2;
             if(y>=560 && y<660) {
                 app.ui_refresh_mode=choice;
+                thingsos_board_refresh_policy(app.ui_refresh_mode, app.ui_refresh_pages);
                 app.force_refresh=true;
             }
             else if(y>=690) app.ui_weight=choice;

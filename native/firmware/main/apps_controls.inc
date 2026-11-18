@@ -101,13 +101,11 @@ static void app_icon(unsigned type,int left,int top){
         thingsos_rect(&app.canvas,left+27,top+24,14,3,0);thingsos_rect(&app.canvas,left+67,top+24,14,3,0);return;
     }
     if(type==10){
-        /* Word card: outlined card, three text lines and a folded corner. */
-        app_outline(left+26,top+30,56,62);
-        thingsos_rect(&app.canvas,left+33,top+42,42,3,0);
-        thingsos_rect(&app.canvas,left+33,top+54,42,3,0);
-        thingsos_rect(&app.canvas,left+33,top+66,28,3,0);
-        for(int i=0;i<10;++i){thingsos_rect(&app.canvas,left+70+i,top+30+i,3,3,0);
-            thingsos_rect(&app.canvas,left+80-i,top+30+i,3,3,0);}
+        /* Book cover with the word "abandon" set on two lines. */
+        app_outline(left+8,top+12,92,84);
+        thingsos_rect(&app.canvas,left+18,top+12,3,84,0);      /* spine */
+        centered_label("aban",left+22,top+52,21,74);
+        centered_label("don",left+22,top+80,21,74);
         return;
     }
     if(type<APP_ICON_COUNT)app_icon_bitmap(app_icon_glyphs[type],APP_ICON_GLYPH_SIZE,left+25,top+25);
@@ -285,8 +283,10 @@ static bool app_back(void){
     return false;
 }
 #include "control_center.inc"
+static bool vocab_hold(int x,int y,uint64_t elapsed);
 static bool app_hold(int x,int y,uint64_t elapsed){
     if(!app.controls_open && wallpaper_hold(x,y,elapsed))return true;
+    if(vocab_hold(x,y,elapsed))return true;
     if(!app.controls_open||app.controls_wifi_confirm||elapsed<580||x<36||x>=333||y<183||y>=320)return false;
     if(transfer_blocks_ui()){say("请先结束传书，再修改网络设置");return true;}
     control_wifi_details();return true;
@@ -389,19 +389,26 @@ static bool app_controls_tap(int x,int y){
     }
     int left=control_left(),w=control_width();
     bool light_on=app.light_mode!=0;unsigned volume_row=light_on?2:0;
-    for(unsigned row=0;row<3;++row){int cy=control_row(row);if(y<cy-35||y>=cy+35||x<left||x>=left+w)continue;
+    for(unsigned row=0;row<3;++row){int cy=control_row(row);if(y<cy-35||y>=cy+35||x<left-40||x>=left+w+40)continue;
         if(!light_on&&row!=volume_row)return true;
         unsigned* value=row==volume_row?&app.audio_volume:row==0?&app.light_level:&app.light_warmth;
+        unsigned before=*value;
         {int track=left+86,length=w-172;
             unsigned step=value==&app.light_level?1u:value==&app.light_warmth?10u:5u;
             int snap=value==&app.light_level?1:5;
-            if(x<left+64)*value=*value>=step?*value-step:0;
-            else if(x>=left+w-64)*value=*value<=(unsigned)(100-step)?*value+step:100;
+            /* The round buttons sit 64 px in from each edge, but taps often
+               land in the 36 px bezel margin; widen both edge zones. */
+            if(x<left+80)*value=*value>=step?*value-step:0;
+            else if(x>=left+w-80)*value=*value<=(unsigned)(100-step)?*value+step:100;
             else if(x>=track-20&&x<=track+length+20){int percent=(x-track)*100/length;percent=percent<0?0:percent>100?100:percent;*value=(unsigned)((percent+snap/2)/snap*snap);}
             else return true;
         }
         if(row==1&&light_on)app.light_mode=app.light_last_mode=3;
+        if(app.haptic_enabled)thingsos_board_haptic(25);   /* immediate confirmation */
+        int64_t apply_start=esp_timer_get_time();
         if(row==volume_row)thingsos_audio_volume(app.audio_volume);else app_light_apply();
+        ESP_LOGI("controls","row=%u x=%d y=%d %u->%u apply=%lldms",row,x,y,before,*value,
+                 (long long)((esp_timer_get_time()-apply_start)/1000));
         preferences_save();app.dirty=true;return true;
     }
     if(!wide&&thingsos_audio_active()&&y>=836&&y<1026){

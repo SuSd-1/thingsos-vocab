@@ -2979,6 +2979,9 @@ static void return_to_menu(void) {
 static void capacitive_key_dispatch(thingsos_key_action_t action) {
     if(alarm_active()){if(action!=THINGSOS_KEY_NONE)alarm_finish(action==THINGSOS_KEY_NEXT);return;}
     if(app.asleep)return;
+    /* Every physical key press pulses the motor, including keys consumed by
+       app-specific handlers further down. */
+    if(action!=THINGSOS_KEY_NONE && app.haptic_enabled)thingsos_board_haptic(50);
     if(app.pin.required || app.page==THINGSOS_UI_LOCK_PIN) {
         if(app.page==THINGSOS_UI_LOCK){unlock_screen();return;}
         if(app.pin.required && app.page!=THINGSOS_UI_LOCK_PIN)pin_wake();
@@ -2998,8 +3001,9 @@ static void capacitive_key_dispatch(thingsos_key_action_t action) {
     if(online_modal_key(action))return;
     if((action==THINGSOS_KEY_PREVIOUS||action==THINGSOS_KEY_MENU)&&
        (app.controls_open||app_media.preview||app.page==THINGSOS_UI_APPS||app.page==THINGSOS_UI_RECORDER||app.page==THINGSOS_UI_MUSIC||app.page==THINGSOS_UI_ALARM||app.page==THINGSOS_UI_SYSTEM||app.page==THINGSOS_UI_TRANSFER||app.page==THINGSOS_UI_WIFI)&&app_back())return;
-    /* Short motor pulse per key press; 50 ms matches the vendor firmware. */
-    if(app.haptic_enabled)thingsos_board_haptic(50);
+    /* Physical keys must always produce a visible change: force the full
+       calibrated frame so differential UI modes cannot hide the response. */
+    if(action!=THINGSOS_KEY_NONE)app.force_refresh=true;
     if(app.page==THINGSOS_UI_FILES && (action==THINGSOS_KEY_MENU || action==THINGSOS_KEY_PREVIOUS) && (app.file_action_open || app.file_more)) {
         app.file_action_open=app.file_more=false;app.dirty=true;return;
     }
@@ -4135,6 +4139,9 @@ void app_main(void) {
             }
             reader_cache_output_begin();
             thingsos_board_static_page(ui_static_panel_page());
+            /* Display settings can change while the device runs: re-apply the
+               panel policy so 首页刷新/首页全刷 take effect immediately. */
+            thingsos_board_refresh_policy(app.ui_refresh_mode, app.ui_refresh_pages);
             e = (app.page == THINGSOS_UI_VOCAB)
                 ? vocab_region_present(&app.canvas)
                 : app.lock_wave_pending ? present_lock_transition() : pin_region?thingsos_board_present_pin_input(&app.canvas):loading_region?online_modal_present_card():system_region?app_system_present():audio_region?app_audio_present():cubox_region?app_cubox_present():app.feedback_refresh
