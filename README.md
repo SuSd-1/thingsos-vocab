@@ -5,6 +5,9 @@
 **不背单词风格**的单词学习应用：6588 词的词书、三轮学习、记忆曲线复习、
 离线发音、统计概览与设置页。
 
+> **免责声明**：本固件仅限尝鲜与个人备份使用，不承诺修复 bug、不做长期维护；
+> 刷机有风险（可能变砖、丢数据），请自行备份并承担后果。
+>
 > 本仓库包含上游完整源码；背单词应用位于 `native/src/vocab*.c` 与
 > `native/firmware/main/vocab_ui.inc`，对上游的改动集中在这几处：
 > `native/include/thingsos/ui.h`、`native/firmware/main/apps_controls.inc`、
@@ -23,7 +26,31 @@
 
 ## 安装方式
 
-### 方式 A：直接刷完整应用包（普通用户）
+### 方式 A：一键安装（推荐新手）
+
+```bash
+git clone https://github.com/SuSd-1/thingsos-vocab.git
+cd thingsos-vocab
+./vocab-kit/scripts/install-release.sh
+```
+
+脚本会自动：
+
+1. 找串口（也可 `--port` 指定）；
+2. 从 Releases 下载最新 `ThingsOS_native.bin`；
+3. 校验 SHA256；
+4. 刷到 `0x220000`（不动引导/分区/NVS）。
+
+常用参数：
+
+```bash
+--port /dev/cu.usbmodem1101   # 指定串口
+--tag thingsos-v0.2.0-vocab-v0.0.1
+--dry-run                     # 只下载校验，不刷
+--yes                         # 不询问
+```
+
+### 方式 A2：手动刷完整应用包
 
 从 [Releases](https://github.com/SuSd-1/thingsos-vocab/releases) 下载 `ThingsOS_native.bin`，刷到 `0x220000`：
 
@@ -56,6 +83,10 @@ git am patches/*.patch
 
 仓库**不包含**词库与发音文件（体积与版权原因），只保留 10 词样例。
 请按 [docs/VOCAB-DATA.md](docs/VOCAB-DATA.md) 用你自己的词表生成 `bank.bin` 与音频。
+
+> **访达看不到 `.thingsos`？** 点文件夹名以 `.` 开头的目录默认隐藏：
+> 在访达里按 **⌘ + ⇧ + .**（Command+Shift+句号）显示隐藏文件；
+> 或直接用终端：`open /Volumes/<你的SD卡名>/.thingsos/vocab`。
 
 ### 建议接入 Agent 使用
 
