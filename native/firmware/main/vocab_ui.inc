@@ -835,14 +835,14 @@ static void vocab_draw_done(void) {
 
 static bool vocab_draw(void) {
     if (app.force_refresh) vu_full_requested = true;
-    /* Follow the system font size, clamped so the fixed card geometry never
-       overlaps: 85%..115% of the design size. */
-    if (app.font.ui_size_percent > 115) app.font.ui_size_percent = 115;
-    if (app.font.ui_size_percent < 85) app.font.ui_size_percent = 85;
     if (app.page != THINGSOS_UI_VOCAB) {
         if (vu.started) vocab_stop();
         return false;
     }
+    /* Follow the system font size, clamped so the fixed card geometry never
+       overlaps: 85%..115% of the design size. Only this page is affected. */
+    if (app.font.ui_size_percent > 115) app.font.ui_size_percent = 115;
+    if (app.font.ui_size_percent < 85) app.font.ui_size_percent = 85;
     if (!vocab_start()) {
         vocab_header("背单词");
         label("词库未就绪", 36, 400, 34, 612);
