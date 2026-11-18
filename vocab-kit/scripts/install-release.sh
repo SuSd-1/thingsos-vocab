@@ -105,7 +105,7 @@ $ESPTOOL --chip "$CHIP" -p "$PORT" -b 460800 \
 
 say ""
 if [ "$CHECK_HEALTH" = "1" ] && python3 -c 'import serial' >/dev/null 2>&1; then
-  say "waiting for the app to confirm health (up to 30s) ..."
+  say "waiting for the app to confirm health (up to 60s) ..."
   RESULT=$(python3 - "$PORT" <<'PYHEALTH'
 import sys, time
 import serial
