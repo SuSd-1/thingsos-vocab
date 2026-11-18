@@ -1,7 +1,7 @@
 From c9982134d8be076b57c1432f72af830fb2cb25c4 Mon Sep 17 00:00:00 2001
 From: vocab-kit <local@localhost>
 Date: Wed, 18 Nov 2026 02:55:04 +0800
-Subject: [PATCH 7/8] snapshot: review groups, hard/again split, peek, bottom
+Subject: [PATCH 07/14] snapshot: review groups, hard/again split, peek, bottom
  bar and settings
 
 ---

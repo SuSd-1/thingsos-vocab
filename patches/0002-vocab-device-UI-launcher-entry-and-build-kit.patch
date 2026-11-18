@@ -1,7 +1,7 @@
 From c11ab1b820a51113975278414565f8eb875a516e Mon Sep 17 00:00:00 2001
 From: vocab-kit <local@localhost>
 Date: Tue, 17 Nov 2026 03:59:59 +0800
-Subject: [PATCH 2/8] vocab: device UI, launcher entry and build kit
+Subject: [PATCH 02/14] vocab: device UI, launcher entry and build kit
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
 Content-Transfer-Encoding: 8bit

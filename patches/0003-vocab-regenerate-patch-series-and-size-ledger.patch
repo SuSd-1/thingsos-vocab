@@ -1,7 +1,7 @@
 From 292a0c5a55f8d2ec8697f66416b9036acd57e4f7 Mon Sep 17 00:00:00 2001
 From: vocab-kit <local@localhost>
 Date: Tue, 17 Nov 2026 04:00:17 +0800
-Subject: [PATCH 3/8] vocab: regenerate patch series and size ledger
+Subject: [PATCH 03/14] vocab: regenerate patch series and size ledger
 
 ---
  vocab-kit/docs/VOCAB.md                       |    2 +-

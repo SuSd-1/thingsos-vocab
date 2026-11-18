@@ -1,0 +1,143 @@
+From 382bf88f3d99419beedebe4071306ce0a75fcf2b Mon Sep 17 00:00:00 2001
+From: vocab-kit <local@localhost>
+Date: Thu, 19 Nov 2026 00:39:59 +0800
+Subject: [PATCH 14/14] docs: install methods, release naming and upgrade guide
+
+---
+ README.md       | 43 ++++++++++++++++++++++++++++++-
+ docs/UPGRADE.md | 67 +++++++++++++++++++++++++++++++++++++++++++++++++
+ 2 files changed, 109 insertions(+), 1 deletion(-)
+ create mode 100644 docs/UPGRADE.md
+
+diff --git a/README.md b/README.md
+index 93e8e9c..9f0d5a1 100644
+--- a/README.md
++++ b/README.md
+@@ -18,9 +18,50 @@
+ - **记忆曲线**：FSRS-6（可切经典模式），目标保持率可调；
+ - **离线发音**：Piper 生成的单词与例句 MP3，进屏自动朗读，可点按重播；
+ - **底栏与统计**：「我的」页显示今日/累计词数与学习时长；
+-- **设置页**：每日新词目标、复习上限、每组词数、保持率、算法、乱序、自动发音、答错处理、清空进度；
++- **设置页**：每日新词目标、每组词数、目标保持率、学习算法、随机选词、自动发音、朗读例句、答错处理；
+ - **断点续学**：退出再进从组内原位继续。
+ 
++## 安装方式
++
++### 方式 A：直接刷完整应用包（普通用户）
++
++从 [Releases](https://github.com/SuSd-1/thingsos-vocab/releases) 下载 `ThingsOS_native.bin`，刷到 `0x220000`：
++
++```bash
++esptool --chip esp32s31 -p /dev/cu.usbmodem101 -b 460800 \
++  --before default-reset --after hard-reset \
++  write-flash 0x220000 ThingsOS_native.bin
++```
++
++> **前提**：设备已经刷入对应版本的原版 ThingsOS（本包基于 **ThingsOS 0.2.0**）。
++> 不要把它刷到 `0x0`，也不要覆盖救援分区。
++
++发布命名规则：
++
++```
++ThingsOS v0.2.0 Vocab v0.0.1   ← 本次
++ThingsOS v0.2.0 Vocab v0.0.2   ← 下一次
++```
++
++### 方式 B：打入补丁自行编译（开发者）
++
++```bash
++git checkout -b my-build upstream/0.2.0
++git am patches/*.patch
++```
++
++详见 [docs/UPGRADE.md](docs/UPGRADE.md)。
++
++### 词库与发音
++
++仓库**不包含**词库与发音文件（体积与版权原因），只保留 10 词样例。
++请按 [docs/VOCAB-DATA.md](docs/VOCAB-DATA.md) 用你自己的词表生成 `bank.bin` 与音频。
++
++### 建议接入 Agent 使用
++
++安装固件、导入词库、按需修改（界面/刷新策略/学习流程）都建议交给 Agent 完成：
++把本仓库与设备串口交给 Agent，可直接完成构建、刷机、导入词库与代码调整。
++
+ ## 快速开始
+ 
+ ```bash
+diff --git a/docs/UPGRADE.md b/docs/UPGRADE.md
+new file mode 100644
+index 0000000..0b637a1
+--- /dev/null
++++ b/docs/UPGRADE.md
+@@ -0,0 +1,67 @@
++# 跟随上游 ThingsOS 升级
++
++本项目基于 ThingsOS `0.2.0`，改动分两类：
++
++| 类型 | 内容 | 升级成本 |
++| --- | --- | --- |
++| 新增（外挂） | `native/src/vocab*.c`、`native/firmware/main/vocab_ui.inc`、`native/include/thingsos/vocab.h`、`vocab-kit/`、`tests/` | 低，基本不冲突 |
++| 修改（OS 内部） | 刷新策略、控制中心、实体键、启动器图标、显示设置 | 高，需要解冲突 |
++
++## 冲突热点文件
++
++```
++native/firmware/components/thingsos_board/board.c
++native/firmware/components/thingsos_board/board.h
++native/firmware/components/thingsos_board/panel_waveform.c
++native/firmware/components/thingsos_board/panel_waveform.h
++native/include/thingsos/refresh_policy.h
++native/firmware/main/main.c
++native/firmware/main/alignment.inc
++native/firmware/main/apps_controls.inc
++native/firmware/main/vocab_ui.inc
++native/include/thingsos/vocab.h
++native/src/vocab.c
++```
++
++## 升级步骤
++
++```bash
++# 1. 新上游放到 references/ 或按原脚本导入
++vocab-kit/scripts/import-upstream.sh <新上游目录>
++
++# 2. 新分支，逐个重放补丁
++git checkout -b upstream-<版本> upstream/<版本>
++git am patches/*.patch
++
++# 3. 有冲突时按文件处理：
++#    - board.c 的 present() 分支顺序与波形选择
++#    - refresh_policy.h 的清理频率
++#    - main.c 的按键派发与启动器表
++#    - apps_controls.inc 的控制中心命中区与图标
++# 4. 构建 + 主机测试
++./build/native-host/thingsos_vocab_test
++# 5. 刷机验证：图标、首页、三档显示刷新、控制中心、四选一/撤回
++# 6. 重建补丁序列并打标签
++git format-patch upstream/<版本>..HEAD -o patches
++git tag "thingsos-<版本>-vocab-v<x.y.z>"
++```
++
++## 发布命名
++
++```
++标题：ThingsOS v<上游版本> Vocab v<应用版本>
++例如：ThingsOS v0.2.0 Vocab v0.0.1
++```
++
++软件包只包含 **app 镜像**（刷 `0x220000`），前提是设备已刷入对应的原版 ThingsOS。
++
++## 验证清单
++
++- [ ] 启动健康（display / font / touch）
++- [ ] 启动器图标正常，点击进入背单词
++- [ ] 首页学习/复习可点，实体键上页=学习、下页=复习
++- [ ] 系统显示三档：快速（DU）、均衡（裁剪 GL16 差分）、清晰（全表 GC16 每页清理）
++- [ ] 控制中心亮度/音量/冷暖加减与震动
++- [ ] 四选一、第二轮提示、第三轮无例句
++- [ ] 撤回改判与返回
++- [ ] 体积在预算内：`vocab-kit/scripts/check-size.sh`
+-- 
+2.50.1 (Apple Git-155)
+

@@ -1,0 +1,132 @@
+From bcf09abc04c2cbbb858b44d4f4037385f70def42 Mon Sep 17 00:00:00 2001
+From: vocab-kit <local@localhost>
+Date: Thu, 19 Nov 2026 00:39:39 +0800
+Subject: [PATCH 12/14] ui: control center hit areas, key haptics, launcher
+ icon and settings
+
+---
+ native/firmware/main/alignment.inc     |  2 ++
+ native/firmware/main/apps_controls.inc | 27 ++++++++++++++++----------
+ native/firmware/main/main.c            | 11 +++++++++--
+ 3 files changed, 28 insertions(+), 12 deletions(-)
+
+diff --git a/native/firmware/main/alignment.inc b/native/firmware/main/alignment.inc
+index 94fa111..f936598 100644
+--- a/native/firmware/main/alignment.inc
++++ b/native/firmware/main/alignment.inc
+@@ -663,10 +663,12 @@ static bool alignment_tap(int x, int y) {
+         } else if(x>=228 && x<648 && y>=430 && y<530) {
+             unsigned interval=5+5*((unsigned)(x-228)/105);
+             app.ui_refresh_pages=interval;
++            thingsos_board_refresh_policy(app.ui_refresh_mode, app.ui_refresh_pages);
+         } else if (x>=228 && y>=560 && y<790) {
+             unsigned choice=x<368?0:x<508?1:2;
+             if(y>=560 && y<660) {
+                 app.ui_refresh_mode=choice;
++                thingsos_board_refresh_policy(app.ui_refresh_mode, app.ui_refresh_pages);
+                 app.force_refresh=true;
+             }
+             else if(y>=690) app.ui_weight=choice;
+diff --git a/native/firmware/main/apps_controls.inc b/native/firmware/main/apps_controls.inc
+index 4b590d0..9089607 100644
+--- a/native/firmware/main/apps_controls.inc
++++ b/native/firmware/main/apps_controls.inc
+@@ -101,13 +101,11 @@ static void app_icon(unsigned type,int left,int top){
+         thingsos_rect(&app.canvas,left+27,top+24,14,3,0);thingsos_rect(&app.canvas,left+67,top+24,14,3,0);return;
+     }
+     if(type==10){
+-        /* Word card: outlined card, three text lines and a folded corner. */
+-        app_outline(left+26,top+30,56,62);
+-        thingsos_rect(&app.canvas,left+33,top+42,42,3,0);
+-        thingsos_rect(&app.canvas,left+33,top+54,42,3,0);
+-        thingsos_rect(&app.canvas,left+33,top+66,28,3,0);
+-        for(int i=0;i<10;++i){thingsos_rect(&app.canvas,left+70+i,top+30+i,3,3,0);
+-            thingsos_rect(&app.canvas,left+80-i,top+30+i,3,3,0);}
++        /* Book cover with the word "abandon" set on two lines. */
++        app_outline(left+8,top+12,92,84);
++        thingsos_rect(&app.canvas,left+18,top+12,3,84,0);      /* spine */
++        centered_label("aban",left+22,top+52,21,74);
++        centered_label("don",left+22,top+80,21,74);
+         return;
+     }
+     if(type<APP_ICON_COUNT)app_icon_bitmap(app_icon_glyphs[type],APP_ICON_GLYPH_SIZE,left+25,top+25);
+@@ -285,8 +283,10 @@ static bool app_back(void){
+     return false;
+ }
+ #include "control_center.inc"
++static bool vocab_hold(int x,int y,uint64_t elapsed);
+ static bool app_hold(int x,int y,uint64_t elapsed){
+     if(!app.controls_open && wallpaper_hold(x,y,elapsed))return true;
++    if(vocab_hold(x,y,elapsed))return true;
+     if(!app.controls_open||app.controls_wifi_confirm||elapsed<580||x<36||x>=333||y<183||y>=320)return false;
+     if(transfer_blocks_ui()){say("请先结束传书，再修改网络设置");return true;}
+     control_wifi_details();return true;
+@@ -389,19 +389,26 @@ static bool app_controls_tap(int x,int y){
+     }
+     int left=control_left(),w=control_width();
+     bool light_on=app.light_mode!=0;unsigned volume_row=light_on?2:0;
+-    for(unsigned row=0;row<3;++row){int cy=control_row(row);if(y<cy-35||y>=cy+35||x<left||x>=left+w)continue;
++    for(unsigned row=0;row<3;++row){int cy=control_row(row);if(y<cy-35||y>=cy+35||x<left-40||x>=left+w+40)continue;
+         if(!light_on&&row!=volume_row)return true;
+         unsigned* value=row==volume_row?&app.audio_volume:row==0?&app.light_level:&app.light_warmth;
++        unsigned before=*value;
+         {int track=left+86,length=w-172;
+             unsigned step=value==&app.light_level?1u:value==&app.light_warmth?10u:5u;
+             int snap=value==&app.light_level?1:5;
+-            if(x<left+64)*value=*value>=step?*value-step:0;
+-            else if(x>=left+w-64)*value=*value<=(unsigned)(100-step)?*value+step:100;
++            /* The round buttons sit 64 px in from each edge, but taps often
++               land in the 36 px bezel margin; widen both edge zones. */
++            if(x<left+80)*value=*value>=step?*value-step:0;
++            else if(x>=left+w-80)*value=*value<=(unsigned)(100-step)?*value+step:100;
+             else if(x>=track-20&&x<=track+length+20){int percent=(x-track)*100/length;percent=percent<0?0:percent>100?100:percent;*value=(unsigned)((percent+snap/2)/snap*snap);}
+             else return true;
+         }
+         if(row==1&&light_on)app.light_mode=app.light_last_mode=3;
++        if(app.haptic_enabled)thingsos_board_haptic(25);   /* immediate confirmation */
++        int64_t apply_start=esp_timer_get_time();
+         if(row==volume_row)thingsos_audio_volume(app.audio_volume);else app_light_apply();
++        ESP_LOGI("controls","row=%u x=%d y=%d %u->%u apply=%lldms",row,x,y,before,*value,
++                 (long long)((esp_timer_get_time()-apply_start)/1000));
+         preferences_save();app.dirty=true;return true;
+     }
+     if(!wide&&thingsos_audio_active()&&y>=836&&y<1026){
+diff --git a/native/firmware/main/main.c b/native/firmware/main/main.c
+index ba2bc1a..b34e895 100644
+--- a/native/firmware/main/main.c
++++ b/native/firmware/main/main.c
+@@ -2979,6 +2979,9 @@ static void return_to_menu(void) {
+ static void capacitive_key_dispatch(thingsos_key_action_t action) {
+     if(alarm_active()){if(action!=THINGSOS_KEY_NONE)alarm_finish(action==THINGSOS_KEY_NEXT);return;}
+     if(app.asleep)return;
++    /* Every physical key press pulses the motor, including keys consumed by
++       app-specific handlers further down. */
++    if(action!=THINGSOS_KEY_NONE && app.haptic_enabled)thingsos_board_haptic(50);
+     if(app.pin.required || app.page==THINGSOS_UI_LOCK_PIN) {
+         if(app.page==THINGSOS_UI_LOCK){unlock_screen();return;}
+         if(app.pin.required && app.page!=THINGSOS_UI_LOCK_PIN)pin_wake();
+@@ -2998,8 +3001,9 @@ static void capacitive_key_dispatch(thingsos_key_action_t action) {
+     if(online_modal_key(action))return;
+     if((action==THINGSOS_KEY_PREVIOUS||action==THINGSOS_KEY_MENU)&&
+        (app.controls_open||app_media.preview||app.page==THINGSOS_UI_APPS||app.page==THINGSOS_UI_RECORDER||app.page==THINGSOS_UI_MUSIC||app.page==THINGSOS_UI_ALARM||app.page==THINGSOS_UI_SYSTEM||app.page==THINGSOS_UI_TRANSFER||app.page==THINGSOS_UI_WIFI)&&app_back())return;
+-    /* Short motor pulse per key press; 50 ms matches the vendor firmware. */
+-    if(app.haptic_enabled)thingsos_board_haptic(50);
++    /* Physical keys must always produce a visible change: force the full
++       calibrated frame so differential UI modes cannot hide the response. */
++    if(action!=THINGSOS_KEY_NONE)app.force_refresh=true;
+     if(app.page==THINGSOS_UI_FILES && (action==THINGSOS_KEY_MENU || action==THINGSOS_KEY_PREVIOUS) && (app.file_action_open || app.file_more)) {
+         app.file_action_open=app.file_more=false;app.dirty=true;return;
+     }
+@@ -4135,6 +4139,9 @@ void app_main(void) {
+             }
+             reader_cache_output_begin();
+             thingsos_board_static_page(ui_static_panel_page());
++            /* Display settings can change while the device runs: re-apply the
++               panel policy so 首页刷新/首页全刷 take effect immediately. */
++            thingsos_board_refresh_policy(app.ui_refresh_mode, app.ui_refresh_pages);
+             e = (app.page == THINGSOS_UI_VOCAB)
+                 ? vocab_region_present(&app.canvas)
+                 : app.lock_wave_pending ? present_lock_transition() : pin_region?thingsos_board_present_pin_input(&app.canvas):loading_region?online_modal_present_card():system_region?app_system_present():audio_region?app_audio_present():cubox_region?app_cubox_present():app.feedback_refresh
+-- 
+2.50.1 (Apple Git-155)
+

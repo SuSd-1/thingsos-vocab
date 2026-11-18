@@ -1,8 +1,8 @@
 From a6bc8b1fb02568ac80c19e6b9caf39218f57d553 Mon Sep 17 00:00:00 2001
 From: vocab-kit <local@localhost>
 Date: Wed, 18 Nov 2026 03:04:33 +0800
-Subject: [PATCH 8/8] vocab: single plan-based scheduler; drop legacy queue and
- unused APIs
+Subject: [PATCH 08/14] vocab: single plan-based scheduler; drop legacy queue
+ and unused APIs
 
 ---
  native/firmware/main/vocab_ui.inc |  45 ++------

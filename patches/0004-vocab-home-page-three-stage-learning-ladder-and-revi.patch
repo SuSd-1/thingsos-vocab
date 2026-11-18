@@ -1,8 +1,8 @@
 From 63fe9909bea111b2a459fe396fba097024f9d0be Mon Sep 17 00:00:00 2001
 From: vocab-kit <local@localhost>
 Date: Tue, 17 Nov 2026 04:46:54 +0800
-Subject: [PATCH 4/8] vocab: home page, three-stage learning ladder and review
- booster
+Subject: [PATCH 04/14] vocab: home page, three-stage learning ladder and
+ review booster
 
 - core: learning levels (quiz -> example -> bare word), focus sessions,
   distractors, pos in bank v3, HARD/AGAIN review re-enters the ladder

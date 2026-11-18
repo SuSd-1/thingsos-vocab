@@ -1,7 +1,7 @@
 From cadf35ecb2bc6e16bf575d8863f2cac2f6c944ed Mon Sep 17 00:00:00 2001
 From: vocab-kit <local@localhost>
 Date: Tue, 17 Nov 2026 13:49:05 +0800
-Subject: [PATCH 5/8] vocab: pos/sections/undo, resume persistence fix, piper
+Subject: [PATCH 05/14] vocab: pos/sections/undo, resume persistence fix, piper
  audio + example TTS
 
 - bank v4 (derived/phrase) with v3 compatibility; POS aliases normalised

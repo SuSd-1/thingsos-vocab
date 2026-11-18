@@ -1,7 +1,7 @@
 From e0ee73c2e626a22003ae05da4225139a93c3322b Mon Sep 17 00:00:00 2001
 From: vocab-kit <local@localhost>
 Date: Wed, 18 Nov 2026 01:55:10 +0800
-Subject: [PATCH 6/8] snapshot: 6588-word book, line-per-POS gloss, chained
+Subject: [PATCH 06/14] snapshot: 6588-word book, line-per-POS gloss, chained
  audio, review stats fix
 
 ---
