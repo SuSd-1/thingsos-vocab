@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 /* Word-card bank, FSRS session and durable progress.
  *
- * Files under <root>/.thingsos/vocab/
+ * Files under <root>/vocab/
  *   bank.bin        immutable word bank (produced by vocab_pack.py)
  *   state.dat       snapshot: 24-byte header + one 28-byte record per card + CRC
  *   journal.dat     append-only (id + record) log replayed over the snapshot
@@ -162,7 +162,7 @@ uint32_t vocab_minutes_from_epoch(uint32_t yyyymmdd, unsigned hour, unsigned min
 }
 
 static void path_of(char *buf, size_t bytes, const char *name) {
-    snprintf(buf, bytes, "%s/.thingsos/vocab/%s", g_root, name);
+    snprintf(buf, bytes, "%s/vocab/%s", g_root, name);
 }
 
 static bool ensure_dir(const char *path) {
@@ -174,9 +174,9 @@ static bool ensure_dirs(void) {
     char path[256];
     snprintf(path, sizeof(path), "%s/.thingsos", g_root);
     if (!ensure_dir(path)) return false;
-    snprintf(path, sizeof(path), "%s/.thingsos/vocab", g_root);
+    snprintf(path, sizeof(path), "%s/vocab", g_root);
     if (!ensure_dir(path)) return false;
-    snprintf(path, sizeof(path), "%s/.thingsos/vocab/audio", g_root);
+    snprintf(path, sizeof(path), "%s/vocab/audio", g_root);
     return ensure_dir(path);
 }
 
@@ -199,7 +199,7 @@ void vocab_config_defaults(vocab_config_t *cfg) {
 bool vocab_config_load(const char *root, vocab_config_t *cfg) {
     vocab_config_defaults(cfg);
     char path[256];
-    snprintf(path, sizeof(path), "%s/.thingsos/vocab/config.bin", root);
+    snprintf(path, sizeof(path), "%s/vocab/config.bin", root);
     FILE *f = fopen(path, "rb");
     if (!f) return false;
     unsigned char raw[VOCAB_CONFIG_BYTES];
@@ -233,7 +233,7 @@ bool vocab_config_load(const char *root, vocab_config_t *cfg) {
 
 bool vocab_config_save(const char *root, const vocab_config_t *cfg) {
     char path[256];
-    snprintf(path, sizeof(path), "%s/.thingsos/vocab/config.bin", root);
+    snprintf(path, sizeof(path), "%s/vocab/config.bin", root);
     unsigned char raw[VOCAB_CONFIG_BYTES] = {0};
     memcpy(raw, VOCAB_CONFIG_MAGIC, 4);
     raw[4] = (unsigned char)cfg->mode;
@@ -1424,13 +1424,13 @@ bool vocab_reset_progress(void) {
 
 bool vocab_audio_path(uint32_t id, char *buf, size_t bytes) {
     if (!buf || bytes == 0) return false;
-    snprintf(buf, bytes, "%s/.thingsos/vocab/audio/%u.mp3", g_root, (unsigned)id);
+    snprintf(buf, bytes, "%s/vocab/audio/%u.mp3", g_root, (unsigned)id);
     return access(buf, R_OK) == 0;
 }
 
 bool vocab_example_audio_path(uint32_t id, char *buf, size_t bytes) {
     if (!buf || bytes == 0) return false;
-    snprintf(buf, bytes, "%s/.thingsos/vocab/audio/%u_ex.mp3", g_root, (unsigned)id);
+    snprintf(buf, bytes, "%s/vocab/audio/%u_ex.mp3", g_root, (unsigned)id);
     return access(buf, R_OK) == 0;
 }
 

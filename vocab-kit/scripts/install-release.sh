@@ -159,8 +159,8 @@ else
 fi
 say ""
 say "done. next steps:"
-say "  1) put bank.bin and audio/ into /sdcard/.thingsos/vocab/ (see docs/VOCAB-DATA.md)"
+say "  1) put bank.bin and audio/ into /sdcard/vocab/ (see docs/VOCAB-DATA.md)"
 say "  2) Finder hides dot-folders: press Cmd+Shift+. to show .thingsos,"
-say "     or use Terminal: open /Volumes/<SD>/.thingsos/vocab"
+say "     or use Terminal: open /Volumes/<SD>/vocab"
 say "  3) to keep progress, do not run erase-flash; app-only flashing preserves SD and NVS."
 say "  4) if the screen shows the rescue system, unplug power for 3s and plug it back in once."

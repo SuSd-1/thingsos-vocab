@@ -47,7 +47,7 @@ TATOEBA=~/vocab-data/cmn.txt
 # 可选：--no-audio、--to-sd /Volumes/<SD>、--tatoeba <文件>
 ```
 
-产出目录 `build/book/sd/.thingsos/vocab/`：
+产出目录 `build/book/sd/vocab/`：
 
 ```
 bank.bin
@@ -72,7 +72,7 @@ idf.py --preview -B ../../build/native-idf -DTHINGSOS_BUILD_VERSION=0.2.0-vocab 
 
 - [ ] 串口出现设备
 - [ ] `install-release.sh` 输出 `boot health: confirmed`
-- [ ] SD 卡存在 `.thingsos/vocab/bank.bin`
+- [ ] SD 卡存在 `vocab/bank.bin`
 - [ ] 背单词首页显示学习/复习数量
 - [ ] 发音可播放（`audio/<id>.mp3`）
 
@@ -83,5 +83,5 @@ idf.py --preview -B ../../build/native-idf -DTHINGSOS_BUILD_VERSION=0.2.0-vocab 
 | 刷完进救援系统 | 断电 3 秒再上电一次；不要连续复位 |
 | `no /dev/cu.usbmodem*` | 换数据线 / 确认 BOOT 模式 |
 | esptool 不支持 esp32s31 | 用 ESP-IDF 自带 Python 的 esptool |
-| 词库未就绪 | 检查 `bank.bin` 是否在 `.thingsos/vocab/` |
+| 词库未就绪 | 检查 `bank.bin` 是否在 `vocab/` |
 | 例句缺失 | 提供 Tatoeba 语料，或让 Agent 生成后写入 CSV |

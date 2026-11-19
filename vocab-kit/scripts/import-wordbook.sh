@@ -92,7 +92,7 @@ fi
 
 say ""
 say "[3/4] pack bank.bin ..."
-PACK_DIR="$OUT/sd/.thingsos/vocab"
+PACK_DIR="$OUT/sd/vocab"
 if [ "$AUDIO" = "1" ]; then
   "$PY" "$ROOT/vocab-kit/tools/vocab_pack.py" --csv "$CSV" \
     --audio-dir "$OUT/audio" --out "$PACK_DIR"
@@ -109,11 +109,11 @@ say "folder: $PACK_DIR"
 if [ -n "$TO_SD" ]; then
   [ -d "$TO_SD" ] || die "SD path not found: $TO_SD"
   say ""
-  say "copying to $TO_SD/.thingsos/vocab ..."
-  mkdir -p "$TO_SD/.thingsos/vocab"
-  cp -R "$PACK_DIR/." "$TO_SD/.thingsos/vocab/"
+  say "copying to $TO_SD/vocab ..."
+  mkdir -p "$TO_SD/vocab"
+  cp -R "$PACK_DIR/." "$TO_SD/vocab/"
   say "copied"
 fi
 
 say ""
-say "done. copy $PACK_DIR to the SD card as .thingsos/vocab/ (or re-run with --to-sd /Volumes/<SD>)"
+say "done. copy $PACK_DIR to the SD card as vocab/ (or re-run with --to-sd /Volumes/<SD>)"

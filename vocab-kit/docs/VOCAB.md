@@ -51,10 +51,10 @@ CSV（UTF-8）列：`word, phonetic, pos, meaning, example_en, example_zh, root,
 
 ```bash
 python3 vocab-kit/tools/vocab_pack.py \
-  --csv my-bank.csv --audio-dir my-audio --out build/my-bank/.thingsos/vocab
+  --csv my-bank.csv --audio-dir my-audio --out build/my-bank/vocab
 ```
 
-把 `build/my-bank/.thingsos/vocab/` 整个拷到 SD 卡的 `/sdcard/.thingsos/vocab/`。
+把 `build/my-bank/vocab/` 整个拷到 SD 卡的 `/sdcard/vocab/`。
 
 `bank.bin` 当前为 **v3**：32 字节索引（8×uint32：word/meaning/example_en/
 example_zh/root/phonetic/group/pos），固件只接受 v3，旧包会被拒绝。
@@ -72,7 +72,7 @@ example_zh/root/phonetic/group/pos），固件只接受 v3，旧包会被拒绝�
 
 ```bash
 python3 vocab-kit/tools/make_test_bank.py --out build/vocab-test
-# 产物：build/vocab-test/sd/.thingsos/vocab/{bank.bin,audio/,report.txt}
+# 产物：build/vocab-test/sd/vocab/{bank.bin,audio/,report.txt}
 VOCAB_TEST_ROOT="$PWD/build/vocab-test/sd" ./build/native-host/thingsos_vocab_test
 ```
 
@@ -103,4 +103,4 @@ git format-patch upstream/0.2.1..vocab -o vocab-kit/patches
 - `native/src/vocab_fsrs.c`：FSRS-6 记忆模型（21 权重）
 - `native/firmware/main/vocab_ui.inc`：卡片界面、四档评分、按键
 - 集成点：`ui.h` 页面枚举、`apps_controls.inc`（draw/tap/启动器/图标）、`main.c`（include + 按键）
-- 数据：`/sdcard/.thingsos/vocab/{bank.bin,audio,state.dat,journal.dat,config.bin,review-log.csv}`
+- 数据：`/sdcard/vocab/{bank.bin,audio,state.dat,journal.dat,config.bin,review-log.csv}`

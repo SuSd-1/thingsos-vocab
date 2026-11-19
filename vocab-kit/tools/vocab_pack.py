@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Pack a CSV word list (+ optional audio) into a ThingsOS vocab SD bundle.
 
-Output layout (copy the directory contents to /sdcard/.thingsos/vocab/):
+Output layout (copy the directory contents to /sdcard/vocab/):
 
     bank.bin
     audio/<id>.mp3

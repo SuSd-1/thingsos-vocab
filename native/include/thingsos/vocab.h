@@ -2,7 +2,7 @@
 /* Offline word-card learning: FSRS-6 scheduling on top of a small on-SD bank.
  *
  * The core is plain C with stdio only, so the same code runs on the device and
- * in host tests. All persistent files live under <root>/.thingsos/vocab/.
+ * in host tests. All persistent files live under <root>/vocab/.
  * Time is "minutes since 2020-01-01 00:00 local": minute precision is needed
  * for the 1/10 minute learning steps, day precision for review intervals.
  */

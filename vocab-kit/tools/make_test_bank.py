@@ -4,7 +4,7 @@
     python3 vocab-kit/tools/make_test_bank.py --out build/vocab-test
 
 Produces <out>/bank.csv, <out>/audio-src/<word>.mp3 and the packed SD bundle in
-<out>/sd (.thingsos/vocab layout). Replace bank.csv + audio with your own list
+<out>/sd (vocab layout). Replace bank.csv + audio with your own list
 later; the packing step is identical.
 """
 from __future__ import annotations

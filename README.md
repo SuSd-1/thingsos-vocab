@@ -32,11 +32,11 @@ https://github.com/SuSd-1/thingsos-vocab
 - 只允许刷 0x220000 的 app 分区；绝对不要刷 0x0，也不要执行 erase-flash。
 - 刷完不要连续复位设备：连续 3 次未确认启动会进入救援系统。
 - 如果看到救援系统（rescue）：彻底断电（拔 USB）等 3 秒再上电一次即可，不要立刻重刷。
-- 刷机前如果 SD 卡可读，先备份 SD 上的 .thingsos/vocab 目录。
+- 刷机前如果 SD 卡可读，先备份 SD 上的 vocab 目录。
 
 【词库】
 - 如果我已经有词库：把 bank.bin 与 audio/ 放到 SD 卡
-  /sdcard/.thingsos/vocab/ 下（访达里按 Cmd+Shift+. 显示隐藏文件夹）。
+  /sdcard/vocab/ 下（访达里按 Cmd+Shift+. 显示隐藏文件夹）。
 - 如果我给你 Excel 词书：运行
   ./vocab-kit/scripts/import-wordbook.sh <我的词书.xlsx> --jobs 4
   或加 --to-sd /Volumes/<SD卡名> 直接复制到 SD 卡。
@@ -158,7 +158,7 @@ Agent 所需环境与检查清单见 [docs/AGENT-SETUP.md](docs/AGENT-SETUP.md)�
 >
 > **访达看不到 `.thingsos`？** 点文件夹名以 `.` 开头的目录默认隐藏：
 > 在访达里按 **⌘ + ⇧ + .**（Command+Shift+句号）显示隐藏文件；
-> 或直接用终端：`open /Volumes/<你的SD卡名>/.thingsos/vocab`。
+> 或直接用终端：`open /Volumes/<你的SD卡名>/vocab`。
 
 ### 建议接入 Agent 使用
 
@@ -188,7 +188,7 @@ esptool --chip esp32s31 -p /dev/cu.usbmodem101 -b 460800 \
 ```
 
 词库与音频通过 USB 直连写入 SD 卡：
-`/sdcard/.thingsos/vocab/{bank.bin, audio/<id>.mp3, audio/<id>_ex.mp3}`。
+`/sdcard/vocab/{bank.bin, audio/<id>.mp3, audio/<id>_ex.mp3}`。
 
 详细步骤见 [`docs/QUICKSTART.md`](docs/QUICKSTART.md)，
 词书制作见 [`docs/VOCAB-DATA.md`](docs/VOCAB-DATA.md)。

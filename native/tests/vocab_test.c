@@ -40,9 +40,9 @@ static void write_bank(const char *dir, const bank_row_t *rows, size_t count) {
     char path[512];
     snprintf(path, sizeof(path), "%s/.thingsos", dir);
     mkdir(path, 0775);
-    snprintf(path, sizeof(path), "%s/.thingsos/vocab", dir);
+    snprintf(path, sizeof(path), "%s/vocab", dir);
     mkdir(path, 0775);
-    snprintf(path, sizeof(path), "%s/.thingsos/vocab/bank.bin", dir);
+    snprintf(path, sizeof(path), "%s/vocab/bank.bin", dir);
     FILE *f = fopen(path, "wb");
     CHECK(f != NULL);
 
@@ -212,7 +212,7 @@ int main(void) {
     vocab_close(now);
 
     /* Corrupt state must not crash: open falls back to a fresh session. */
-    snprintf(cmd, sizeof(cmd), "%s/.thingsos/vocab/state.dat", root);
+    snprintf(cmd, sizeof(cmd), "%s/vocab/state.dat", root);
     FILE *f = fopen(cmd, "wb");
     CHECK(f != NULL);
     fputs("broken", f);
@@ -331,7 +331,7 @@ int main(void) {
     CHECK(system(cmd) == 0);
 
     /* Optional: validate a real packed bundle (VOCAB_TEST_ROOT points at the
-       directory that contains .thingsos/vocab, i.e. the SD root). */
+       directory that contains vocab, i.e. the SD root). */
     const char *external = getenv("VOCAB_TEST_ROOT");
     if (external && *external) {
         CHECK(vocab_open(external, now));

@@ -57,7 +57,7 @@ python3 vocab-kit/tools/make_audio.py \
 ```bash
 python3 vocab-kit/tools/vocab_pack.py \
   --csv build/book/bank.csv --audio-dir build/book/audio \
-  --out build/book/sd/.thingsos/vocab
+  --out build/book/sd/vocab
 ```
 
 产物：`bank.bin`（v4 索引，40 B/词）+ `audio/<id>.mp3` + `audio/<id>_ex.mp3`。

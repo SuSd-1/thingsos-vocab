@@ -883,7 +883,7 @@ static bool vocab_draw(void) {
     if (!vocab_start()) {
         vocab_header("背单词");
         label("词库未就绪", 36, 400, 34, 612);
-        label("请把 bank.bin 放进 /sdcard/.thingsos/vocab/", 36, 450, 24, 612);
+        label("请把 bank.bin 放进 /sdcard/vocab/", 36, 450, 24, 612);
         char line[96];
         snprintf(line, sizeof(line), "SD 卡: %s", media() ? "已挂载" : "未挂载");
         label(line, 36, 500, 24, 612);

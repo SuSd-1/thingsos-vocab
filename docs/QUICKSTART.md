@@ -57,10 +57,10 @@ esptool --chip esp32s31 -p /dev/cu.usbmodem101 -b 460800 \
 3. 拷贝：
 
 ```bash
-mkdir -p "/Volumes/NO NAME/.thingsos/vocab"
-cp bank.bin "/Volumes/NO NAME/.thingsos/vocab/"
-mkdir -p "/Volumes/NO NAME/.thingsos/vocab/audio"
-cp audio/*.mp3 "/Volumes/NO NAME/.thingsos/vocab/audio/"
+mkdir -p "/Volumes/NO NAME/vocab"
+cp bank.bin "/Volumes/NO NAME/vocab/"
+mkdir -p "/Volumes/NO NAME/vocab/audio"
+cp audio/*.mp3 "/Volumes/NO NAME/vocab/audio/"
 ```
 
 4. 推出磁盘，设备上关闭 USB 直连。
@@ -68,7 +68,7 @@ cp audio/*.mp3 "/Volumes/NO NAME/.thingsos/vocab/audio/"
 目录结构：
 
 ```
-/sdcard/.thingsos/vocab/
+/sdcard/vocab/
 ├── bank.bin            词库
 ├── audio/0.mp3         单词发音（按词库 id 命名）
 ├── audio/0_ex.mp3      例句发音
