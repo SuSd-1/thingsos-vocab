@@ -152,8 +152,10 @@ static void preferences_load(void) {
     app.landscape_enabled=false;app.immersive_enabled=false;app.vertical_enabled=false;
     app.canvas.inverted=false; /* Ignore the retired polarity preference on upgrade. */
     app.tilt_enabled=false; /* Missing or invalid keys default off. */
-    app.light_mode=0;app.light_level=40;app.haptic_enabled=true;
-    app.light_warmth=50;app.light_last_mode=3;app.audio_volume=40;app.wifi_enabled=true;
+    /* Ship defaults: frontlight on at 10% (auto mode doubles a stored 5),
+       neutral colour temperature, volume 50%. */
+    app.light_mode=3;app.light_level=5;app.haptic_enabled=true;
+    app.light_warmth=50;app.light_last_mode=3;app.audio_volume=50;app.wifi_enabled=true;
     /* Never erase existing NVS to recover an initialization failure. */
     if (nvs_flash_init() != ESP_OK) return;
     nvs_handle_t h;

@@ -103,7 +103,7 @@ cd thingsos-vocab
 
 ```bash
 --port /dev/cu.usbmodem1101   # 指定串口
---tag thingsos-metalio-v0.2.0-vocab-v0.0.2
+--tag thingsos-metalio-v0.2.0-vocab-v0.0.3
 --dry-run                     # 只下载校验，不刷
 --yes                         # 不询问
 ```
@@ -124,8 +124,8 @@ esptool --chip esp32s31 -p /dev/cu.usbmodem101 -b 460800 \
 发布命名规则：
 
 ```
-ThingsOS Metalio v0.2.0 Vocab v0.0.2   ← 本次
-ThingsOS Metalio v0.2.0 Vocab v0.0.3   ← 下一次
+ThingsOS Metalio v0.2.0 Vocab v0.0.3   ← 本次
+ThingsOS Metalio v0.2.0 Vocab v0.0.4   ← 下一次
 ```
 
 ### 方式 B：打入补丁自行编译（开发者）
