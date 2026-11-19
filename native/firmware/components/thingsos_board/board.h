@@ -85,6 +85,8 @@ void thingsos_board_idle(void);
 
 /* 0 none, 1 short press, 2 long press (held 3 s). */
 unsigned thingsos_board_power_key(void);
+/* How long the last power-key press was held before release (ms). */
+unsigned thingsos_board_power_release_ms(void);
 /* Volume keys: 0 none, 1 previous page (Vol+), 2 next page (Vol-). */
 unsigned thingsos_board_side_key(void);
 /* BOOT/AI key: 1 on a short release, 0 otherwise. Held at power-on is ignored. */

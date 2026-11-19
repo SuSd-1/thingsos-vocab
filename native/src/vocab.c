@@ -191,6 +191,7 @@ void vocab_config_defaults(vocab_config_t *cfg) {
     cfg->auto_audio = true;
     cfg->group_size = 10;
     cfg->error_mode = 0;
+    cfg->side_keys = false;
     cfg->shuffle = false;
     cfg->auto_example = true;
 }
@@ -218,6 +219,7 @@ bool vocab_config_load(const char *root, vocab_config_t *cfg) {
     cfg->auto_audio = raw[10] != 0;
     cfg->group_size = raw[11];
     cfg->error_mode = raw[12];
+    cfg->side_keys = raw[15] != 0;
     cfg->shuffle = raw[13] != 0;
     cfg->auto_example = raw[14] != 0;
     if (cfg->mode != VOCAB_MODE_CLASSIC) cfg->mode = VOCAB_MODE_FSRS;
@@ -243,7 +245,7 @@ bool vocab_config_save(const char *root, const vocab_config_t *cfg) {
     raw[12] = cfg->error_mode;
     raw[13] = cfg->shuffle ? 1 : 0;
     raw[14] = cfg->auto_example ? 1 : 0;
-    raw[15] = 0;
+    raw[15] = cfg->side_keys ? 1 : 0;
     uint32_t crc = crc32_bytes(raw, 16);
     memcpy(raw + 16, &crc, 4);
     FILE *f = fopen(path, "wb");

@@ -1077,11 +1077,14 @@ void thingsos_board_restart(void) {
    INT (GPIO2) falls on any input change, so the port is read only after an
    edge or while a key is held. Long press fires once at 3 s while held. */
 #define POWER_LONG_US 3000000
+#define POWER_LONG1_US 1000000
 #define KEY_DEBOUNCE_US 30000
 static bool keys_seen,power_down,power_long_sent,power_armed;
 static int64_t power_since,side_since[2];
 static bool side_down[2];
 static unsigned power_event,side_event;
+static unsigned power_release_ms;
+static bool power_hold1_sent;
 static void keys_poll(void) {
     bool held=power_down || side_down[0] || side_down[1];
     if(keys_seen && !held && metalio_ioe_int_level())return;
@@ -1096,11 +1099,14 @@ static void keys_poll(void) {
         power_down=pressed;power_since=now;
         if(!pressed) {
             if(power_armed && !power_long_sent)power_event=power_event==2?2:1;
-            power_armed=true;power_long_sent=false;
+            power_armed=true;power_long_sent=false;power_hold1_sent=false;
+            power_release_ms=(unsigned)((now-power_since)/1000);
         }
     }
     if(power_down && power_armed && !power_long_sent && now-power_since>=POWER_LONG_US) {
         power_long_sent=true;power_event=2;
+    } else if(power_down && power_armed && !power_hold1_sent && now-power_since>=POWER_LONG1_US) {
+        power_hold1_sent=true;power_event=3;
     }
     for(unsigned i=0;i<2;++i) {
         bool down=!(p1&(1u<<((i?METALIO_IO_VOL_DOWN:METALIO_IO_VOL_UP)&7)));
@@ -1110,6 +1116,7 @@ static void keys_poll(void) {
         }
     }
 }
+unsigned thingsos_board_power_release_ms(void) { return power_release_ms; }
 unsigned thingsos_board_power_key(void) {
     keys_poll();
     unsigned action=power_event;power_event=0;

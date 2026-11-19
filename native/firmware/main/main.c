@@ -3829,7 +3829,20 @@ void app_main(void) {
         wifi_scan_step();
         unsigned power_key = thingsos_board_power_key();
         if (power_key) {
-            power_action(power_key);
+            if (vocab_side_keys_active()) {
+                if (power_key == 3) {
+                    if (app.haptic_enabled) thingsos_board_haptic(50);
+                } else if (power_key == 1) {
+                    if (thingsos_board_power_release_ms() >= 1000) power_action(1);
+                    else vocab_side_key(3);
+                } else if (power_key == 2) {
+                    if (app.haptic_enabled) thingsos_board_haptic(80);
+                    vTaskDelay(pdMS_TO_TICKS(80));
+                    power_action(2);
+                }
+            } else if (power_key != 3) {
+                power_action(power_key);
+            }
             pressed = dragging = held = moved = input_contact = false;
             memset(&keys, 0, sizeof(keys));
         }
@@ -3840,9 +3853,13 @@ void app_main(void) {
         }
         /* Reading keeps volume keys as page turns; every other surface uses
            them for volume, including the control center and recorder/music. */
-        if (app.ai_key_enabled && thingsos_board_ai_key() && !app.pin.required && app.page!=THINGSOS_UI_LOCK_PIN) app_ai_record_toggle();
+        if (!app.pin.required && app.page!=THINGSOS_UI_LOCK_PIN) {
+            unsigned ai_key = thingsos_board_ai_key();
+            if (ai_key && !vocab_side_key(0) && app.ai_key_enabled) app_ai_record_toggle();
+        }
         unsigned side_key = thingsos_board_side_key();
-        if (side_key && !app.pin.required && app.page!=THINGSOS_UI_LOCK_PIN) {
+        if (side_key && !app.pin.required && app.page!=THINGSOS_UI_LOCK_PIN &&
+            !vocab_side_key(side_key)) {
             if(app.page==THINGSOS_UI_READING && !app.controls_open)
                 capacitive_key(side_key==1?THINGSOS_KEY_PREVIOUS:THINGSOS_KEY_NEXT);
             else

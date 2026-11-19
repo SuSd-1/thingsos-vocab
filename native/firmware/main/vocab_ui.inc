@@ -670,9 +670,10 @@ static void vocab_draw_home(void) {
     else { snprintf(line, sizeof(line), "%u", review_left); label(line, 376, 1050, 60, 240); }
 }
 
-static const char* const vocab_setting_names[10] = {
+static const char* const vocab_setting_names[11] = {
     "每日新词目标", "每组词数", "目标保持率", "学习算法",
-    "随机选词", "自动发音", "朗读例句", "答错处理", "清空学习进度", "恢复默认设置",
+    "随机选词", "自动发音", "朗读例句", "答错处理", "侧键答题",
+    "清空学习进度", "恢复默认设置",
 };
 
 static void vocab_format_span(uint32_t seconds, char* out, size_t bytes) {
@@ -717,7 +718,7 @@ static void vocab_draw_stats(void) {
 static void vocab_draw_settings(void) {
     vocab_header("设置");
     char value[32];
-    for (int i = 0; i < 10; i++) {
+    for (int i = 0; i < 11; i++) {
         const int y = 236 + i * 70;
         label(vocab_setting_names[i], 36, y, 26, 360);
         value[0] = 0;
@@ -732,7 +733,7 @@ static void vocab_draw_settings(void) {
             thingsos_label_right(&app.font, &app.canvas, value, 36, y, 500);
             vocab_button(548, y - 34, 44, 48, "－");
             vocab_button(600, y - 34, 44, 48, "＋");
-        } else if (i <= 7) {
+        } else if (i <= 8) {
             const char* opt_a = "关";
             const char* opt_b = "开";
             unsigned selected = 0;
@@ -743,6 +744,7 @@ static void vocab_draw_settings(void) {
                 case 5: selected = vu.config.auto_audio ? 1 : 0; break;
                 case 6: selected = vu.config.auto_example ? 1 : 0; break;
                 case 7: opt_a = "组末"; opt_b = "本轮"; selected = vu.config.error_mode ? 1 : 0; break;
+                case 8: selected = vu.config.side_keys ? 1 : 0; break;
             }
             for (unsigned seg = 0; seg < 2; seg++) {
                 const int bx = 382 + (int)seg * 136;
@@ -756,7 +758,7 @@ static void vocab_draw_settings(void) {
                 }
             }
         } else {
-            vocab_button(470, y - 34, 178, 48, i == 8 ? "清 空" : "恢 复");
+            vocab_button(470, y - 34, 178, 48, i == 9 ? "清 空" : "恢 复");
         }
         thingsos_rect(&app.canvas, 36, y + 18, 612, 1, 210);
     }
@@ -969,7 +971,7 @@ static bool vocab_tap(int x, int y) {
             return true;
         }
         const int row = (y - 196) / 70;
-        if (row >= 0 && row < 10 && x >= 380) {
+        if (row >= 0 && row < 11 && x >= 380) {
             const bool plus = x >= 600;
             bool save = true;
             switch (row) {
@@ -1126,6 +1128,36 @@ static bool vocab_tap(int x, int y) {
             else vocab_submit(VOCAB_GOOD);
         }
     }
+    return true;
+}
+
+bool vocab_side_keys_active(void) {
+    return app.page == THINGSOS_UI_VOCAB && vu.config.side_keys &&
+           (vu.screen == VOCAB_SCREEN_LEARN || vu.screen == VOCAB_SCREEN_REVIEW);
+}
+
+/* key: 0 AI, 1 volume up, 2 volume down, 3 power (short press). */
+bool vocab_side_key(unsigned key) {
+    if (!vocab_side_keys_active()) return false;
+    if (vu.phase == VOCAB_PHASE_ANSWER) {
+        if (key == 0) return vocab_tap(200, 1150);   /* 下一词 */
+        if (key == 1) return vocab_tap(500, 1150);   /* 记错了 */
+        return true;                                  /* consume, no action */
+    }
+    if (vu.stage == VOCAB_STAGE_QUIZ) {
+        if (key <= 3)
+            return vocab_tap(100, VOCAB_OPTION_TOP + (int)key * VOCAB_OPTION_PITCH + 12);
+        return true;
+    }
+    if (vu.stage == VOCAB_STAGE_RECALL) {
+        if (key == 0) return vocab_tap(130, 1150);   /* 认识 */
+        if (key == 2) return vocab_tap(340, 1150);   /* 提示 */
+        if (key == 1) return vocab_tap(550, 1150);   /* 不认识 */
+        return true;
+    }
+    if (key == 0) return vocab_tap(130, 1150);       /* 认识 */
+    if (key == 2) return vocab_tap(340, 1150);       /* 模糊 */
+    if (key == 1) return vocab_tap(550, 1150);       /* 忘记了 */
     return true;
 }
 

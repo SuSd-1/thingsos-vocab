@@ -85,6 +85,7 @@ typedef struct {
     bool auto_audio;
     uint8_t group_size;   /* cards per group, 5..20 */
     uint8_t error_mode;   /* 0 = relearn after the group, 1 = retry at round end */
+    bool side_keys;       /* remap the four side keys while learning/reviewing */
     bool shuffle;         /* pick each group in random order */
     bool auto_example;    /* read the example sentence after the word */
 } vocab_config_t;
