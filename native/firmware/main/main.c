@@ -3827,13 +3827,18 @@ void app_main(void) {
         }
         reading_power_poll();
         wifi_scan_step();
-        thingsos_board_key_scan(vocab_side_keys_active());
+        thingsos_board_key_scan(!app.asleep && vocab_side_keys_active());
         unsigned power_key = thingsos_board_power_key();
         if (power_key) {
             ESP_LOGI("vocab","power key=%u after1s=%d active=%d release=%ums",
                      power_key, (int)thingsos_board_power_release_after_1s(),
                      (int)vocab_side_keys_active(), thingsos_board_power_release_ms());
-            if (vocab_side_keys_active()) {
+            if (app.asleep) {
+                /* While asleep any power-key event keeps the original role:
+                   short press wakes, long press powers off. Never map it to a
+                   quiz option or a grade. */
+                if (power_key != 3) power_action(power_key);
+            } else if (vocab_side_keys_active()) {
                 if (power_key == 3) {
                     if (app.haptic_enabled) thingsos_board_haptic(50);
                 } else if (power_key == 1) {
