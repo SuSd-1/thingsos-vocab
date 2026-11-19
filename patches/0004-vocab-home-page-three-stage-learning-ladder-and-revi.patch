@@ -354,7 +354,7 @@ index 71193ef..6f1ef6f 100644
          header("背单词");
 -        label("词库未就绪", 36, 420, 34, 612);
 -        label("请用 vocab_pack.py 生成词库并拷到 SD 卡", 36, 480, 24, 612);
--        label("/sdcard/.thingsos/vocab/", 36, 530, 24, 612);
+-        label("/sdcard/vocab/", 36, 530, 24, 612);
 -        nav();
 -        return true;
 -    }
@@ -363,7 +363,7 @@ index 71193ef..6f1ef6f 100644
 -        header("背单词");
 -        label("今日完成", 36, 360, 40, 612);
 +        label("词库未就绪", 36, 400, 34, 612);
-+        label("请把 bank.bin 放进 /sdcard/.thingsos/vocab/", 36, 450, 24, 612);
++        label("请把 bank.bin 放进 /sdcard/vocab/", 36, 450, 24, 612);
 +        label("用 vocab-kit/tools/vocab_pack.py 生成", 36, 494, 24, 612);
          char line[96];
 -        snprintf(line, sizeof(line), "新词 %u · 复习 %u", (unsigned)vocab_ui.stats.new_today,
@@ -1166,7 +1166,7 @@ index 656743c..afc77c2 100644
 +    vocab_close(t);
  
      /* Corrupt state must not crash: open falls back to a fresh session. */
-     snprintf(cmd, sizeof(cmd), "%s/.thingsos/vocab/state.dat", root);
+     snprintf(cmd, sizeof(cmd), "%s/vocab/state.dat", root);
 @@ -210,7 +227,7 @@ int main(void) {
      fputs("broken", f);
      fclose(f);
@@ -1191,7 +1191,7 @@ index 319bd6a..9e75f9c 100644
  
 @@ -56,6 +56,18 @@ python3 vocab-kit/tools/vocab_pack.py \
  
- 把 `build/my-bank/.thingsos/vocab/` 整个拷到 SD 卡的 `/sdcard/.thingsos/vocab/`。
+ 把 `build/my-bank/vocab/` 整个拷到 SD 卡的 `/sdcard/vocab/`。
  
 +`bank.bin` 当前为 **v3**：32 字节索引（8×uint32：word/meaning/example_en/
 +example_zh/root/phonetic/group/pos），固件只接受 v3，旧包会被拒绝。

@@ -1111,7 +1111,7 @@ index 0eb08cc..9b09574 100644
 +
  bool vocab_audio_path(uint32_t id, char *buf, size_t bytes) {
      if (!buf || bytes == 0) return false;
-     snprintf(buf, bytes, "%s/.thingsos/vocab/audio/%u.mp3", g_root, (unsigned)id);
+     snprintf(buf, bytes, "%s/vocab/audio/%u.mp3", g_root, (unsigned)id);
 @@ -911,6 +1270,19 @@ uint32_t vocab_new_count(void) {
      return fresh;
  }

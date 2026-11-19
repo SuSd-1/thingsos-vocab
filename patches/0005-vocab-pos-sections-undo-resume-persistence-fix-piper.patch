@@ -492,7 +492,7 @@ index 6f1ef6f..5b97015 100644
 -        header("背单词");
 +        vocab_header("背单词");
          label("词库未就绪", 36, 400, 34, 612);
-         label("请把 bank.bin 放进 /sdcard/.thingsos/vocab/", 36, 450, 24, 612);
+         label("请把 bank.bin 放进 /sdcard/vocab/", 36, 450, 24, 612);
 -        label("用 vocab-kit/tools/vocab_pack.py 生成", 36, 494, 24, 612);
          char line[96];
          snprintf(line, sizeof(line), "SD 卡: %s", media() ? "已挂载" : "未挂载");
@@ -1090,7 +1090,7 @@ index d14b6ba..e7d4023 100644
  
 +bool vocab_example_audio_path(uint32_t id, char *buf, size_t bytes) {
 +    if (!buf || bytes == 0) return false;
-+    snprintf(buf, bytes, "%s/.thingsos/vocab/audio/%u_ex.mp3", g_root, (unsigned)id);
++    snprintf(buf, bytes, "%s/vocab/audio/%u_ex.mp3", g_root, (unsigned)id);
 +    return access(buf, R_OK) == 0;
 +}
 +

@@ -93,7 +93,7 @@ index 0000000..0ad7735
 ++/* Offline word-card learning: FSRS-6 scheduling on top of a small on-SD bank.
 ++ *
 ++ * The core is plain C with stdio only, so the same code runs on the device and
-++ * in host tests. All persistent files live under <root>/.thingsos/vocab/.
+++ * in host tests. All persistent files live under <root>/vocab/.
 ++ * Time is "minutes since 2020-01-01 00:00 local": minute precision is needed
 ++ * for the 1/10 minute learning steps, day precision for review intervals.
 ++ */
@@ -249,7 +249,7 @@ index 0000000..0ad7735
 ++// SPDX-License-Identifier: Apache-2.0
 ++/* Word-card bank, FSRS session and durable progress.
 ++ *
-++ * Files under <root>/.thingsos/vocab/
+++ * Files under <root>/vocab/
 ++ *   bank.bin        immutable word bank (produced by vocab_pack.py)
 ++ *   state.dat       snapshot: 24-byte header + one 28-byte record per card + CRC
 ++ *   journal.dat     append-only (id + record) log replayed over the snapshot
@@ -383,7 +383,7 @@ index 0000000..0ad7735
 ++}
 ++
 ++static void path_of(char *buf, size_t bytes, const char *name) {
-++    snprintf(buf, bytes, "%s/.thingsos/vocab/%s", g_root, name);
+++    snprintf(buf, bytes, "%s/vocab/%s", g_root, name);
 ++}
 ++
 ++static bool ensure_dir(const char *path) {
@@ -395,9 +395,9 @@ index 0000000..0ad7735
 ++    char path[256];
 ++    snprintf(path, sizeof(path), "%s/.thingsos", g_root);
 ++    if (!ensure_dir(path)) return false;
-++    snprintf(path, sizeof(path), "%s/.thingsos/vocab", g_root);
+++    snprintf(path, sizeof(path), "%s/vocab", g_root);
 ++    if (!ensure_dir(path)) return false;
-++    snprintf(path, sizeof(path), "%s/.thingsos/vocab/audio", g_root);
+++    snprintf(path, sizeof(path), "%s/vocab/audio", g_root);
 ++    return ensure_dir(path);
 ++}
 ++
@@ -415,7 +415,7 @@ index 0000000..0ad7735
 ++bool vocab_config_load(const char *root, vocab_config_t *cfg) {
 ++    vocab_config_defaults(cfg);
 ++    char path[256];
-++    snprintf(path, sizeof(path), "%s/.thingsos/vocab/config.bin", root);
+++    snprintf(path, sizeof(path), "%s/vocab/config.bin", root);
 ++    FILE *f = fopen(path, "rb");
 ++    if (!f) return false;
 ++    unsigned char raw[VOCAB_CONFIG_BYTES];
@@ -442,7 +442,7 @@ index 0000000..0ad7735
 ++
 ++bool vocab_config_save(const char *root, const vocab_config_t *cfg) {
 ++    char path[256];
-++    snprintf(path, sizeof(path), "%s/.thingsos/vocab/config.bin", root);
+++    snprintf(path, sizeof(path), "%s/vocab/config.bin", root);
 ++    unsigned char raw[VOCAB_CONFIG_BYTES] = {0};
 ++    memcpy(raw, VOCAB_CONFIG_MAGIC, 4);
 ++    raw[4] = (unsigned char)cfg->mode;
@@ -982,7 +982,7 @@ index 0000000..0ad7735
 ++
 ++bool vocab_audio_path(uint32_t id, char *buf, size_t bytes) {
 ++    if (!buf || bytes == 0) return false;
-++    snprintf(buf, bytes, "%s/.thingsos/vocab/audio/%u.mp3", g_root, (unsigned)id);
+++    snprintf(buf, bytes, "%s/vocab/audio/%u.mp3", g_root, (unsigned)id);
 ++    return access(buf, R_OK) == 0;
 ++}
 ++
@@ -1172,9 +1172,9 @@ index 0000000..0ad7735
 ++    char path[512];
 ++    snprintf(path, sizeof(path), "%s/.thingsos", dir);
 ++    mkdir(path, 0775);
-++    snprintf(path, sizeof(path), "%s/.thingsos/vocab", dir);
+++    snprintf(path, sizeof(path), "%s/vocab", dir);
 ++    mkdir(path, 0775);
-++    snprintf(path, sizeof(path), "%s/.thingsos/vocab/bank.bin", dir);
+++    snprintf(path, sizeof(path), "%s/vocab/bank.bin", dir);
 ++    FILE *f = fopen(path, "wb");
 ++    CHECK(f != NULL);
 ++
@@ -1336,7 +1336,7 @@ index 0000000..0ad7735
 ++    vocab_close(later);
 ++
 ++    /* Corrupt state must not crash: open falls back to a fresh session. */
-++    snprintf(cmd, sizeof(cmd), "%s/.thingsos/vocab/state.dat", root);
+++    snprintf(cmd, sizeof(cmd), "%s/vocab/state.dat", root);
 ++    FILE *f = fopen(cmd, "wb");
 ++    CHECK(f != NULL);
 ++    fputs("broken", f);
@@ -1349,7 +1349,7 @@ index 0000000..0ad7735
 ++    CHECK(system(cmd) == 0);
 ++
 ++    /* Optional: validate a real packed bundle (VOCAB_TEST_ROOT points at the
-++       directory that contains .thingsos/vocab, i.e. the SD root). */
+++       directory that contains vocab, i.e. the SD root). */
 ++    const char *external = getenv("VOCAB_TEST_ROOT");
 ++    if (external && *external) {
 ++        CHECK(vocab_open(external, now));
@@ -1654,7 +1654,7 @@ index 663903b..0000000
 -+        header("背单词");
 -+        label("词库未就绪", 36, 420, 34, 612);
 -+        label("请用 vocab_pack.py 生成词库并拷到 SD 卡", 36, 480, 24, 612);
--+        label("/sdcard/.thingsos/vocab/", 36, 530, 24, 612);
+-+        label("/sdcard/vocab/", 36, 530, 24, 612);
 -+        nav();
 -+        return true;
 -+    }
@@ -1813,7 +1813,7 @@ index 663903b..0000000
 -+/* Offline word-card learning: FSRS-6 scheduling on top of a small on-SD bank.
 -+ *
 -+ * The core is plain C with stdio only, so the same code runs on the device and
--+ * in host tests. All persistent files live under <root>/.thingsos/vocab/.
+-+ * in host tests. All persistent files live under <root>/vocab/.
 -+ * Time is "minutes since 2020-01-01 00:00 local": minute precision is needed
 -+ * for the 1/10 minute learning steps, day precision for review intervals.
 -+ */
@@ -1969,7 +1969,7 @@ index 663903b..0000000
 -+// SPDX-License-Identifier: Apache-2.0
 -+/* Word-card bank, FSRS session and durable progress.
 -+ *
--+ * Files under <root>/.thingsos/vocab/
+-+ * Files under <root>/vocab/
 -+ *   bank.bin        immutable word bank (produced by vocab_pack.py)
 -+ *   state.dat       snapshot: 24-byte header + one 28-byte record per card + CRC
 -+ *   journal.dat     append-only (id + record) log replayed over the snapshot
@@ -2103,7 +2103,7 @@ index 663903b..0000000
 -+}
 -+
 -+static void path_of(char *buf, size_t bytes, const char *name) {
--+    snprintf(buf, bytes, "%s/.thingsos/vocab/%s", g_root, name);
+-+    snprintf(buf, bytes, "%s/vocab/%s", g_root, name);
 -+}
 -+
 -+static bool ensure_dir(const char *path) {
@@ -2115,9 +2115,9 @@ index 663903b..0000000
 -+    char path[256];
 -+    snprintf(path, sizeof(path), "%s/.thingsos", g_root);
 -+    if (!ensure_dir(path)) return false;
--+    snprintf(path, sizeof(path), "%s/.thingsos/vocab", g_root);
+-+    snprintf(path, sizeof(path), "%s/vocab", g_root);
 -+    if (!ensure_dir(path)) return false;
--+    snprintf(path, sizeof(path), "%s/.thingsos/vocab/audio", g_root);
+-+    snprintf(path, sizeof(path), "%s/vocab/audio", g_root);
 -+    return ensure_dir(path);
 -+}
 -+
@@ -2135,7 +2135,7 @@ index 663903b..0000000
 -+bool vocab_config_load(const char *root, vocab_config_t *cfg) {
 -+    vocab_config_defaults(cfg);
 -+    char path[256];
--+    snprintf(path, sizeof(path), "%s/.thingsos/vocab/config.bin", root);
+-+    snprintf(path, sizeof(path), "%s/vocab/config.bin", root);
 -+    FILE *f = fopen(path, "rb");
 -+    if (!f) return false;
 -+    unsigned char raw[VOCAB_CONFIG_BYTES];
@@ -2162,7 +2162,7 @@ index 663903b..0000000
 -+
 -+bool vocab_config_save(const char *root, const vocab_config_t *cfg) {
 -+    char path[256];
--+    snprintf(path, sizeof(path), "%s/.thingsos/vocab/config.bin", root);
+-+    snprintf(path, sizeof(path), "%s/vocab/config.bin", root);
 -+    unsigned char raw[VOCAB_CONFIG_BYTES] = {0};
 -+    memcpy(raw, VOCAB_CONFIG_MAGIC, 4);
 -+    raw[4] = (unsigned char)cfg->mode;
@@ -2702,7 +2702,7 @@ index 663903b..0000000
 -+
 -+bool vocab_audio_path(uint32_t id, char *buf, size_t bytes) {
 -+    if (!buf || bytes == 0) return false;
--+    snprintf(buf, bytes, "%s/.thingsos/vocab/audio/%u.mp3", g_root, (unsigned)id);
+-+    snprintf(buf, bytes, "%s/vocab/audio/%u.mp3", g_root, (unsigned)id);
 -+    return access(buf, R_OK) == 0;
 -+}
 -+
@@ -2892,9 +2892,9 @@ index 663903b..0000000
 -+    char path[512];
 -+    snprintf(path, sizeof(path), "%s/.thingsos", dir);
 -+    mkdir(path, 0775);
--+    snprintf(path, sizeof(path), "%s/.thingsos/vocab", dir);
+-+    snprintf(path, sizeof(path), "%s/vocab", dir);
 -+    mkdir(path, 0775);
--+    snprintf(path, sizeof(path), "%s/.thingsos/vocab/bank.bin", dir);
+-+    snprintf(path, sizeof(path), "%s/vocab/bank.bin", dir);
 -+    FILE *f = fopen(path, "wb");
 -+    CHECK(f != NULL);
 -+
@@ -3056,7 +3056,7 @@ index 663903b..0000000
 -+    vocab_close(later);
 -+
 -+    /* Corrupt state must not crash: open falls back to a fresh session. */
--+    snprintf(cmd, sizeof(cmd), "%s/.thingsos/vocab/state.dat", root);
+-+    snprintf(cmd, sizeof(cmd), "%s/vocab/state.dat", root);
 -+    FILE *f = fopen(cmd, "wb");
 -+    CHECK(f != NULL);
 -+    fputs("broken", f);
@@ -3069,7 +3069,7 @@ index 663903b..0000000
 -+    CHECK(system(cmd) == 0);
 -+
 -+    /* Optional: validate a real packed bundle (VOCAB_TEST_ROOT points at the
--+       directory that contains .thingsos/vocab, i.e. the SD root). */
+-+       directory that contains vocab, i.e. the SD root). */
 -+    const char *external = getenv("VOCAB_TEST_ROOT");
 -+    if (external && *external) {
 -+        CHECK(vocab_open(external, now));
@@ -3148,16 +3148,16 @@ index 663903b..0000000
 -+
 -+```bash
 -+python3 vocab-kit/tools/vocab_pack.py \
--+  --csv my-bank.csv --audio-dir my-audio --out build/my-bank/.thingsos/vocab
+-+  --csv my-bank.csv --audio-dir my-audio --out build/my-bank/vocab
 -+```
 -+
--+把 `build/my-bank/.thingsos/vocab/` 整个拷到 SD 卡的 `/sdcard/.thingsos/vocab/`。
+-+把 `build/my-bank/vocab/` 整个拷到 SD 卡的 `/sdcard/vocab/`。
 -+
 -+50 词测试包：
 -+
 -+```bash
 -+python3 vocab-kit/tools/make_test_bank.py --out build/vocab-test
--+# 产物：build/vocab-test/sd/.thingsos/vocab/{bank.bin,audio/,report.txt}
+-+# 产物：build/vocab-test/sd/vocab/{bank.bin,audio/,report.txt}
 -+VOCAB_TEST_ROOT="$PWD/build/vocab-test/sd" ./build/native-host/thingsos_vocab_test
 -+```
 -+
@@ -3188,7 +3188,7 @@ index 663903b..0000000
 -+- `native/src/vocab_fsrs.c`：FSRS-6 记忆模型（21 权重）
 -+- `native/firmware/main/vocab_ui.inc`：卡片界面、四档评分、按键
 -+- 集成点：`ui.h` 页面枚举、`apps_controls.inc`（draw/tap/启动器/图标）、`main.c`（include + 按键）
--+- 数据：`/sdcard/.thingsos/vocab/{bank.bin,audio,state.dat,journal.dat,config.bin,review-log.csv}`
+-+- 数据：`/sdcard/vocab/{bank.bin,audio,state.dat,journal.dat,config.bin,review-log.csv}`
 -diff --git a/vocab-kit/scripts/apply-and-build.sh b/vocab-kit/scripts/apply-and-build.sh
 -new file mode 100755
 -index 0000000..22b7423
@@ -3503,7 +3503,7 @@ index 663903b..0000000
 -+    python3 vocab-kit/tools/make_test_bank.py --out build/vocab-test
 -+
 -+Produces <out>/bank.csv, <out>/audio-src/<word>.mp3 and the packed SD bundle in
--+<out>/sd (.thingsos/vocab layout). Replace bank.csv + audio with your own list
+-+<out>/sd (vocab layout). Replace bank.csv + audio with your own list
 -+later; the packing step is identical.
 -+"""
 -+from __future__ import annotations
@@ -3621,7 +3621,7 @@ index 663903b..0000000
 -+#!/usr/bin/env python3
 -+"""Pack a CSV word list (+ optional audio) into a ThingsOS vocab SD bundle.
 -+
--+Output layout (copy the directory contents to /sdcard/.thingsos/vocab/):
+-+Output layout (copy the directory contents to /sdcard/vocab/):
 -+
 -+    bank.bin
 -+    audio/<id>.mp3
@@ -4038,7 +4038,7 @@ index 0000000..2599bbc
 ++        header("背单词");
 ++        label("词库未就绪", 36, 420, 34, 612);
 ++        label("请用 vocab_pack.py 生成词库并拷到 SD 卡", 36, 480, 24, 612);
-++        label("/sdcard/.thingsos/vocab/", 36, 530, 24, 612);
+++        label("/sdcard/vocab/", 36, 530, 24, 612);
 ++        nav();
 ++        return true;
 ++    }
@@ -4246,16 +4246,16 @@ index 0000000..2599bbc
 ++
 ++```bash
 ++python3 vocab-kit/tools/vocab_pack.py \
-++  --csv my-bank.csv --audio-dir my-audio --out build/my-bank/.thingsos/vocab
+++  --csv my-bank.csv --audio-dir my-audio --out build/my-bank/vocab
 ++```
 ++
-++把 `build/my-bank/.thingsos/vocab/` 整个拷到 SD 卡的 `/sdcard/.thingsos/vocab/`。
+++把 `build/my-bank/vocab/` 整个拷到 SD 卡的 `/sdcard/vocab/`。
 ++
 ++50 词测试包：
 ++
 ++```bash
 ++python3 vocab-kit/tools/make_test_bank.py --out build/vocab-test
-++# 产物：build/vocab-test/sd/.thingsos/vocab/{bank.bin,audio/,report.txt}
+++# 产物：build/vocab-test/sd/vocab/{bank.bin,audio/,report.txt}
 ++VOCAB_TEST_ROOT="$PWD/build/vocab-test/sd" ./build/native-host/thingsos_vocab_test
 ++```
 ++
@@ -4286,7 +4286,7 @@ index 0000000..2599bbc
 ++- `native/src/vocab_fsrs.c`：FSRS-6 记忆模型（21 权重）
 ++- `native/firmware/main/vocab_ui.inc`：卡片界面、四档评分、按键
 ++- 集成点：`ui.h` 页面枚举、`apps_controls.inc`（draw/tap/启动器/图标）、`main.c`（include + 按键）
-++- 数据：`/sdcard/.thingsos/vocab/{bank.bin,audio,state.dat,journal.dat,config.bin,review-log.csv}`
+++- 数据：`/sdcard/vocab/{bank.bin,audio,state.dat,journal.dat,config.bin,review-log.csv}`
 +diff --git a/vocab-kit/patches/0001-vocab-offline-word-cards-with-FSRS-6-scheduling.patch b/vocab-kit/patches/0001-vocab-offline-word-cards-with-FSRS-6-scheduling.patch
 +new file mode 100644
 +index 0000000..663903b
@@ -4569,7 +4569,7 @@ index 0000000..2599bbc
 +++        header("背单词");
 +++        label("词库未就绪", 36, 420, 34, 612);
 +++        label("请用 vocab_pack.py 生成词库并拷到 SD 卡", 36, 480, 24, 612);
-+++        label("/sdcard/.thingsos/vocab/", 36, 530, 24, 612);
++++        label("/sdcard/vocab/", 36, 530, 24, 612);
 +++        nav();
 +++        return true;
 +++    }
@@ -4728,7 +4728,7 @@ index 0000000..2599bbc
 +++/* Offline word-card learning: FSRS-6 scheduling on top of a small on-SD bank.
 +++ *
 +++ * The core is plain C with stdio only, so the same code runs on the device and
-+++ * in host tests. All persistent files live under <root>/.thingsos/vocab/.
++++ * in host tests. All persistent files live under <root>/vocab/.
 +++ * Time is "minutes since 2020-01-01 00:00 local": minute precision is needed
 +++ * for the 1/10 minute learning steps, day precision for review intervals.
 +++ */
@@ -4884,7 +4884,7 @@ index 0000000..2599bbc
 +++// SPDX-License-Identifier: Apache-2.0
 +++/* Word-card bank, FSRS session and durable progress.
 +++ *
-+++ * Files under <root>/.thingsos/vocab/
++++ * Files under <root>/vocab/
 +++ *   bank.bin        immutable word bank (produced by vocab_pack.py)
 +++ *   state.dat       snapshot: 24-byte header + one 28-byte record per card + CRC
 +++ *   journal.dat     append-only (id + record) log replayed over the snapshot
@@ -5018,7 +5018,7 @@ index 0000000..2599bbc
 +++}
 +++
 +++static void path_of(char *buf, size_t bytes, const char *name) {
-+++    snprintf(buf, bytes, "%s/.thingsos/vocab/%s", g_root, name);
++++    snprintf(buf, bytes, "%s/vocab/%s", g_root, name);
 +++}
 +++
 +++static bool ensure_dir(const char *path) {
@@ -5030,9 +5030,9 @@ index 0000000..2599bbc
 +++    char path[256];
 +++    snprintf(path, sizeof(path), "%s/.thingsos", g_root);
 +++    if (!ensure_dir(path)) return false;
-+++    snprintf(path, sizeof(path), "%s/.thingsos/vocab", g_root);
++++    snprintf(path, sizeof(path), "%s/vocab", g_root);
 +++    if (!ensure_dir(path)) return false;
-+++    snprintf(path, sizeof(path), "%s/.thingsos/vocab/audio", g_root);
++++    snprintf(path, sizeof(path), "%s/vocab/audio", g_root);
 +++    return ensure_dir(path);
 +++}
 +++
@@ -5050,7 +5050,7 @@ index 0000000..2599bbc
 +++bool vocab_config_load(const char *root, vocab_config_t *cfg) {
 +++    vocab_config_defaults(cfg);
 +++    char path[256];
-+++    snprintf(path, sizeof(path), "%s/.thingsos/vocab/config.bin", root);
++++    snprintf(path, sizeof(path), "%s/vocab/config.bin", root);
 +++    FILE *f = fopen(path, "rb");
 +++    if (!f) return false;
 +++    unsigned char raw[VOCAB_CONFIG_BYTES];
@@ -5077,7 +5077,7 @@ index 0000000..2599bbc
 +++
 +++bool vocab_config_save(const char *root, const vocab_config_t *cfg) {
 +++    char path[256];
-+++    snprintf(path, sizeof(path), "%s/.thingsos/vocab/config.bin", root);
++++    snprintf(path, sizeof(path), "%s/vocab/config.bin", root);
 +++    unsigned char raw[VOCAB_CONFIG_BYTES] = {0};
 +++    memcpy(raw, VOCAB_CONFIG_MAGIC, 4);
 +++    raw[4] = (unsigned char)cfg->mode;
@@ -5617,7 +5617,7 @@ index 0000000..2599bbc
 +++
 +++bool vocab_audio_path(uint32_t id, char *buf, size_t bytes) {
 +++    if (!buf || bytes == 0) return false;
-+++    snprintf(buf, bytes, "%s/.thingsos/vocab/audio/%u.mp3", g_root, (unsigned)id);
++++    snprintf(buf, bytes, "%s/vocab/audio/%u.mp3", g_root, (unsigned)id);
 +++    return access(buf, R_OK) == 0;
 +++}
 +++
@@ -5807,9 +5807,9 @@ index 0000000..2599bbc
 +++    char path[512];
 +++    snprintf(path, sizeof(path), "%s/.thingsos", dir);
 +++    mkdir(path, 0775);
-+++    snprintf(path, sizeof(path), "%s/.thingsos/vocab", dir);
++++    snprintf(path, sizeof(path), "%s/vocab", dir);
 +++    mkdir(path, 0775);
-+++    snprintf(path, sizeof(path), "%s/.thingsos/vocab/bank.bin", dir);
++++    snprintf(path, sizeof(path), "%s/vocab/bank.bin", dir);
 +++    FILE *f = fopen(path, "wb");
 +++    CHECK(f != NULL);
 +++
@@ -5971,7 +5971,7 @@ index 0000000..2599bbc
 +++    vocab_close(later);
 +++
 +++    /* Corrupt state must not crash: open falls back to a fresh session. */
-+++    snprintf(cmd, sizeof(cmd), "%s/.thingsos/vocab/state.dat", root);
++++    snprintf(cmd, sizeof(cmd), "%s/vocab/state.dat", root);
 +++    FILE *f = fopen(cmd, "wb");
 +++    CHECK(f != NULL);
 +++    fputs("broken", f);
@@ -5984,7 +5984,7 @@ index 0000000..2599bbc
 +++    CHECK(system(cmd) == 0);
 +++
 +++    /* Optional: validate a real packed bundle (VOCAB_TEST_ROOT points at the
-+++       directory that contains .thingsos/vocab, i.e. the SD root). */
++++       directory that contains vocab, i.e. the SD root). */
 +++    const char *external = getenv("VOCAB_TEST_ROOT");
 +++    if (external && *external) {
 +++        CHECK(vocab_open(external, now));
@@ -6063,16 +6063,16 @@ index 0000000..2599bbc
 +++
 +++```bash
 +++python3 vocab-kit/tools/vocab_pack.py \
-+++  --csv my-bank.csv --audio-dir my-audio --out build/my-bank/.thingsos/vocab
++++  --csv my-bank.csv --audio-dir my-audio --out build/my-bank/vocab
 +++```
 +++
-+++把 `build/my-bank/.thingsos/vocab/` 整个拷到 SD 卡的 `/sdcard/.thingsos/vocab/`。
++++把 `build/my-bank/vocab/` 整个拷到 SD 卡的 `/sdcard/vocab/`。
 +++
 +++50 词测试包：
 +++
 +++```bash
 +++python3 vocab-kit/tools/make_test_bank.py --out build/vocab-test
-+++# 产物：build/vocab-test/sd/.thingsos/vocab/{bank.bin,audio/,report.txt}
++++# 产物：build/vocab-test/sd/vocab/{bank.bin,audio/,report.txt}
 +++VOCAB_TEST_ROOT="$PWD/build/vocab-test/sd" ./build/native-host/thingsos_vocab_test
 +++```
 +++
@@ -6103,7 +6103,7 @@ index 0000000..2599bbc
 +++- `native/src/vocab_fsrs.c`：FSRS-6 记忆模型（21 权重）
 +++- `native/firmware/main/vocab_ui.inc`：卡片界面、四档评分、按键
 +++- 集成点：`ui.h` 页面枚举、`apps_controls.inc`（draw/tap/启动器/图标）、`main.c`（include + 按键）
-+++- 数据：`/sdcard/.thingsos/vocab/{bank.bin,audio,state.dat,journal.dat,config.bin,review-log.csv}`
++++- 数据：`/sdcard/vocab/{bank.bin,audio,state.dat,journal.dat,config.bin,review-log.csv}`
 ++diff --git a/vocab-kit/scripts/apply-and-build.sh b/vocab-kit/scripts/apply-and-build.sh
 ++new file mode 100755
 ++index 0000000..22b7423
@@ -6418,7 +6418,7 @@ index 0000000..2599bbc
 +++    python3 vocab-kit/tools/make_test_bank.py --out build/vocab-test
 +++
 +++Produces <out>/bank.csv, <out>/audio-src/<word>.mp3 and the packed SD bundle in
-+++<out>/sd (.thingsos/vocab layout). Replace bank.csv + audio with your own list
++++<out>/sd (vocab layout). Replace bank.csv + audio with your own list
 +++later; the packing step is identical.
 +++"""
 +++from __future__ import annotations
@@ -6536,7 +6536,7 @@ index 0000000..2599bbc
 +++#!/usr/bin/env python3
 +++"""Pack a CSV word list (+ optional audio) into a ThingsOS vocab SD bundle.
 +++
-+++Output layout (copy the directory contents to /sdcard/.thingsos/vocab/):
++++Output layout (copy the directory contents to /sdcard/vocab/):
 +++
 +++    bank.bin
 +++    audio/<id>.mp3
@@ -7017,7 +7017,7 @@ index 0000000..2599bbc
 ++    python3 vocab-kit/tools/make_test_bank.py --out build/vocab-test
 ++
 ++Produces <out>/bank.csv, <out>/audio-src/<word>.mp3 and the packed SD bundle in
-++<out>/sd (.thingsos/vocab layout). Replace bank.csv + audio with your own list
+++<out>/sd (vocab layout). Replace bank.csv + audio with your own list
 ++later; the packing step is identical.
 ++"""
 ++from __future__ import annotations
@@ -7135,7 +7135,7 @@ index 0000000..2599bbc
 ++#!/usr/bin/env python3
 ++"""Pack a CSV word list (+ optional audio) into a ThingsOS vocab SD bundle.
 ++
-++Output layout (copy the directory contents to /sdcard/.thingsos/vocab/):
+++Output layout (copy the directory contents to /sdcard/vocab/):
 ++
 ++    bank.bin
 ++    audio/<id>.mp3

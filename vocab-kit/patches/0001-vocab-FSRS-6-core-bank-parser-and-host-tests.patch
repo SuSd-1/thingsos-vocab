@@ -59,7 +59,7 @@ index 0000000..2a6267b
 +/* Offline word-card learning: FSRS-6 scheduling on top of a small on-SD bank.
 + *
 + * The core is plain C with stdio only, so the same code runs on the device and
-+ * in host tests. All persistent files live under <root>/.thingsos/vocab/.
++ * in host tests. All persistent files live under <root>/vocab/.
 + * Time is "minutes since 2020-01-01 00:00 local": minute precision is needed
 + * for the 1/10 minute learning steps, day precision for review intervals.
 + */
@@ -215,7 +215,7 @@ index 0000000..79f8856
 +// SPDX-License-Identifier: Apache-2.0
 +/* Word-card bank, FSRS session and durable progress.
 + *
-+ * Files under <root>/.thingsos/vocab/
++ * Files under <root>/vocab/
 + *   bank.bin        immutable word bank (produced by vocab_pack.py)
 + *   state.dat       snapshot: 24-byte header + one 28-byte record per card + CRC
 + *   journal.dat     append-only (id + record) log replayed over the snapshot
@@ -349,7 +349,7 @@ index 0000000..79f8856
 +}
 +
 +static void path_of(char *buf, size_t bytes, const char *name) {
-+    snprintf(buf, bytes, "%s/.thingsos/vocab/%s", g_root, name);
++    snprintf(buf, bytes, "%s/vocab/%s", g_root, name);
 +}
 +
 +static bool ensure_dir(const char *path) {
@@ -361,9 +361,9 @@ index 0000000..79f8856
 +    char path[256];
 +    snprintf(path, sizeof(path), "%s/.thingsos", g_root);
 +    if (!ensure_dir(path)) return false;
-+    snprintf(path, sizeof(path), "%s/.thingsos/vocab", g_root);
++    snprintf(path, sizeof(path), "%s/vocab", g_root);
 +    if (!ensure_dir(path)) return false;
-+    snprintf(path, sizeof(path), "%s/.thingsos/vocab/audio", g_root);
++    snprintf(path, sizeof(path), "%s/vocab/audio", g_root);
 +    return ensure_dir(path);
 +}
 +
@@ -381,7 +381,7 @@ index 0000000..79f8856
 +bool vocab_config_load(const char *root, vocab_config_t *cfg) {
 +    vocab_config_defaults(cfg);
 +    char path[256];
-+    snprintf(path, sizeof(path), "%s/.thingsos/vocab/config.bin", root);
++    snprintf(path, sizeof(path), "%s/vocab/config.bin", root);
 +    FILE *f = fopen(path, "rb");
 +    if (!f) return false;
 +    unsigned char raw[VOCAB_CONFIG_BYTES];
@@ -408,7 +408,7 @@ index 0000000..79f8856
 +
 +bool vocab_config_save(const char *root, const vocab_config_t *cfg) {
 +    char path[256];
-+    snprintf(path, sizeof(path), "%s/.thingsos/vocab/config.bin", root);
++    snprintf(path, sizeof(path), "%s/vocab/config.bin", root);
 +    unsigned char raw[VOCAB_CONFIG_BYTES] = {0};
 +    memcpy(raw, VOCAB_CONFIG_MAGIC, 4);
 +    raw[4] = (unsigned char)cfg->mode;
@@ -948,7 +948,7 @@ index 0000000..79f8856
 +
 +bool vocab_audio_path(uint32_t id, char *buf, size_t bytes) {
 +    if (!buf || bytes == 0) return false;
-+    snprintf(buf, bytes, "%s/.thingsos/vocab/audio/%u.mp3", g_root, (unsigned)id);
++    snprintf(buf, bytes, "%s/vocab/audio/%u.mp3", g_root, (unsigned)id);
 +    return access(buf, R_OK) == 0;
 +}
 +
@@ -1138,9 +1138,9 @@ index 0000000..656743c
 +    char path[512];
 +    snprintf(path, sizeof(path), "%s/.thingsos", dir);
 +    mkdir(path, 0775);
-+    snprintf(path, sizeof(path), "%s/.thingsos/vocab", dir);
++    snprintf(path, sizeof(path), "%s/vocab", dir);
 +    mkdir(path, 0775);
-+    snprintf(path, sizeof(path), "%s/.thingsos/vocab/bank.bin", dir);
++    snprintf(path, sizeof(path), "%s/vocab/bank.bin", dir);
 +    FILE *f = fopen(path, "wb");
 +    CHECK(f != NULL);
 +
@@ -1302,7 +1302,7 @@ index 0000000..656743c
 +    vocab_close(later);
 +
 +    /* Corrupt state must not crash: open falls back to a fresh session. */
-+    snprintf(cmd, sizeof(cmd), "%s/.thingsos/vocab/state.dat", root);
++    snprintf(cmd, sizeof(cmd), "%s/vocab/state.dat", root);
 +    FILE *f = fopen(cmd, "wb");
 +    CHECK(f != NULL);
 +    fputs("broken", f);
@@ -1315,7 +1315,7 @@ index 0000000..656743c
 +    CHECK(system(cmd) == 0);
 +
 +    /* Optional: validate a real packed bundle (VOCAB_TEST_ROOT points at the
-+       directory that contains .thingsos/vocab, i.e. the SD root). */
++       directory that contains vocab, i.e. the SD root). */
 +    const char *external = getenv("VOCAB_TEST_ROOT");
 +    if (external && *external) {
 +        CHECK(vocab_open(external, now));

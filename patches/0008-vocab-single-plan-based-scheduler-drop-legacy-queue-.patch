@@ -531,7 +531,7 @@ index efd85bc..fd3efe0 100644
 +    vocab_close(now);
  
      /* Corrupt state must not crash: open falls back to a fresh session. */
-     snprintf(cmd, sizeof(cmd), "%s/.thingsos/vocab/state.dat", root);
+     snprintf(cmd, sizeof(cmd), "%s/vocab/state.dat", root);
 -- 
 2.50.1 (Apple Git-155)
 
