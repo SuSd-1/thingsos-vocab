@@ -995,6 +995,9 @@ bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus)
                                           : (g_plan_hdr.phase != 2u);
         bool usable = loaded && g_plan_hdr.focus == (uint8_t)focus && type_ok &&
                       g_plan_hdr.pos < g_plan_hdr.len;
+        /* Review always rebuilds from what is due now: a leftover group of 3
+           must not shadow the 11 cards that have become due since. */
+        if (focus == 2) usable = false;
         VOCAB_LOG("begin focus=%d loaded=%d plan(focus=%u phase=%u pos=%u len=%u) usable=%d",
                   focus, (int)loaded, (unsigned)g_plan_hdr.focus, (unsigned)g_plan_hdr.phase,
                   (unsigned)g_plan_hdr.pos, (unsigned)g_plan_hdr.len, (int)usable);
