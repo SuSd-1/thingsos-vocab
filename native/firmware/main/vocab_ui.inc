@@ -253,7 +253,7 @@ static void vocab_split_pos(const char* in, char* pos, size_t pos_bytes,
     size_t n = 0;
     bool dotted = false;
     while (*p && *p != ' ' && *p != '\n' && n + 1 < pos_bytes) {
-        if (*p == '.') { p++; dotted = true; break; }
+        if (*p == '.') { if (n + 1 < pos_bytes) pos[n++] = '.'; p++; dotted = true; break; }
         pos[n++] = *p++;
     }
     pos[n] = 0;
@@ -304,6 +304,11 @@ static void vocab_build_quiz(void) {
     vu.graded = false;
     vu.pending_grade = VOCAB_AGAIN;
     vu.hint_shown = false;
+    ESP_LOGI("vocab", "quiz word='%s' id=%u answer_at=%u", vu.card.word,
+             (unsigned)vu.card.id, (unsigned)vu.answer_at);
+    for (unsigned i = 0; i < vu.option_count; i++)
+        ESP_LOGI("vocab", "  option %u word='%s' pos='%s' mean='%s'",
+                 i, vu.option_words[i], vu.option_pos[i], vu.option_mean[i]);
 }
 
 /* Spoken word on every learning/review screen; stops any running audio first so

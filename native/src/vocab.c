@@ -991,7 +991,14 @@ bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus)
                 if (n) { plan_build_cards(ids, n, 1, 3); built = true; }
             }
             if (!built && focus == 2) built = plan_build_review(now_min);
-            if (!built) plan_build_learn(now_min);
+            /* Review with nothing due must stay empty: falling back to a learn
+               plan is what showed a new word inside 复习. */
+            if (!built && focus != 2) built = plan_build_learn(now_min);
+            if (!built) {
+                g_plan_hdr.len = 0;
+                g_plan_hdr.pos = 0;
+                g_plan_hdr.phase = (focus == 2) ? 2u : 0u;
+            }
             g_plan_hdr.focus = (uint8_t)focus;
             plan_save();
         }
