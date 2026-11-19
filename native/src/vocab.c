@@ -838,9 +838,15 @@ static bool plan_build_learn(uint32_t now_min) {
     uint32_t ids[32];
     const unsigned per_group = (g_config.group_size >= 5 && g_config.group_size <= 20)
                                    ? g_config.group_size : PLAN_GROUP_SIZE;
-    unsigned n = plan_collect(VOCAB_STATE_NEW, VOCAB_STATE_NEW, now_min, ids, per_group);
-    if (!n)
-        n = plan_collect(VOCAB_STATE_LEARNING, VOCAB_STATE_RELEARNING, now_min, ids, per_group);
+    /* Relearning first: words you just forgot come back before new material. */
+    unsigned n = plan_collect(VOCAB_STATE_RELEARNING, VOCAB_STATE_LEARNING, now_min,
+                              ids, per_group);
+    if (n < per_group) {
+        uint32_t more[32];
+        const unsigned m = plan_collect(VOCAB_STATE_NEW, VOCAB_STATE_NEW, now_min,
+                                        more, per_group - n);
+        for (unsigned i = 0; i < m && n < per_group; i++) ids[n++] = more[i];
+    }
     if (!n) return false;
     g_plan_hdr.group++;
     plan_build_cards(ids, n, 0, 3);
