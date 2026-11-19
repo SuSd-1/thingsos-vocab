@@ -570,15 +570,13 @@ static bool schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
     vocab_fsrs_memory_t memory = {record->stability, record->difficulty};
 
     if (learning) {
-        if (grade == VOCAB_AGAIN) {
+        if (grade != VOCAB_GOOD) {
+            /* 模糊 and 忘记 both fail a round: restart at round 1. */
             level = 0;
             record->state = record->state == VOCAB_STATE_NEW ? VOCAB_STATE_LEARNING
                                                              : VOCAB_STATE_RELEARNING;
-            record->due_min = now_min;   /* immediately queued for the next round */
+            record->due_min = now_min;
             record->lapses++;
-        } else if (grade == VOCAB_HARD) {
-            record->due_min = now_min + 5;
-            if (record->state == VOCAB_STATE_NEW) record->state = VOCAB_STATE_LEARNING;
         } else {
             if (level < 2) {
                 level++;
@@ -852,25 +850,47 @@ static unsigned plan_collect(uint8_t state_a, uint8_t state_b, uint32_t now_min,
     return n;
 }
 
+static vocab_card_stage_t stage_for_level(uint8_t level) {
+    return level == 0 ? VOCAB_STAGE_QUIZ : level == 1 ? VOCAB_STAGE_RECALL : VOCAB_STAGE_WORD;
+}
+
 static bool plan_build_learn(uint32_t now_min) {
     uint32_t ids[32];
     const unsigned per_group = (g_config.group_size >= 5 && g_config.group_size <= 20)
                                    ? g_config.group_size : PLAN_GROUP_SIZE;
-    /* Relearning first: words you just forgot come back before new material. */
-    unsigned n = plan_collect(VOCAB_STATE_RELEARNING, VOCAB_STATE_LEARNING, now_min,
-                              ids, per_group);
-    if (n < per_group) {
-        uint32_t more[32];
-        const unsigned m = plan_collect(VOCAB_STATE_NEW, VOCAB_STATE_NEW, now_min,
-                                        more, per_group - n);
-        for (unsigned i = 0; i < m && n < per_group; i++) ids[n++] = more[i];
+    /* Old words (unfinished stages) form their own group first. */
+    unsigned n = 0;
+    for (uint32_t i = 0; i < g_count && n < per_group; i++) {
+        const vocab_state_record_t *r = &g_records[i];
+        if (r->state == VOCAB_STATE_LEARNING || r->state == VOCAB_STATE_RELEARNING)
+            ids[n++] = i;
+    }
+    if (!n) {
+        const unsigned quota = g_new_today < g_config.new_limit
+                                   ? (unsigned)(g_config.new_limit - g_new_today) : 0;
+        const unsigned want = quota < per_group ? quota : per_group;
+        for (uint32_t i = 0; i < g_count && n < want; i++)
+            if (g_records[i].state == VOCAB_STATE_NEW) ids[n++] = i;
     }
     if (!n) return false;
-    VOCAB_LOG("learn plan: %u cards (first id=%u state=%u due=%u now=%u)",
+    VOCAB_LOG("learn plan: %u words (first id=%u state=%u level=%u)",
               n, (unsigned)ids[0], (unsigned)g_records[ids[0]].state,
-              (unsigned)g_records[ids[0]].due_min, (unsigned)now_min);
+              (unsigned)(g_records[ids[0]].flags & 0x03u));
+    g_plan_hdr.len = 0;
+    g_plan_hdr.pos = 0;
+    g_plan_hdr.phase = 0;
     g_plan_hdr.group++;
-    plan_build_cards(ids, n, 0, 3);
+    /* Round-major: all quizzes, then all recall, then all bare-word. Words at
+       a later level skip the rounds they already passed. */
+    for (unsigned lvl = 0; lvl <= 2 && g_plan_hdr.len < PLAN_MAX; lvl++) {
+        for (unsigned i = 0; i < n && g_plan_hdr.len < PLAN_MAX; i++) {
+            if ((g_records[ids[i]].flags & 0x03u) > lvl) continue;
+            plan_entry_t *e = &g_plan[g_plan_hdr.len++];
+            e->id = ids[i];
+            e->stage = (uint8_t)stage_for_level((uint8_t)lvl);
+            e->flags = 0;
+        }
+    }
     return true;
 }
 
@@ -953,6 +973,9 @@ bool vocab_open(const char *root, uint32_t now_min) {
     g_plan = vocab_alloc(PLAN_MAX, sizeof(plan_entry_t));
     time_load();
     vocab_config_load(g_root, &g_config);
+    g_new_today = 0;
+    g_reviews_today = 0;
+    g_last_day = 0;
     g_open = true;
     g_current_valid = false;
     return true;
@@ -1114,6 +1137,9 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
     g_now = now_min;
     vocab_state_record_t *record = &g_records[g_current];
     const bool was_new = record->state == VOCAB_STATE_NEW;
+    const bool was_learning = record->state == VOCAB_STATE_NEW ||
+                              record->state == VOCAB_STATE_LEARNING ||
+                              record->state == VOCAB_STATE_RELEARNING;
     const bool was_review = record->state == VOCAB_STATE_REVIEW || record->state == VOCAB_STATE_RELEARNING;
 
     vocab_undo_t *undo = &g_undo[g_undo_count % VOCAB_UNDO_DEPTH];
@@ -1126,7 +1152,9 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
 
     schedule_record(record, grade, now_min, &g_config);
     journal_append(g_current, record);
-    if (was_new && g_new_today < 0xFFFF) g_new_today++;
+    /* 今日新词 = words that finished all three rounds today. */
+    if (was_learning && record->state == VOCAB_STATE_REVIEW && g_new_today < 0xFFFF)
+        g_new_today++;
     /* Only due-card answers count as reviews; learning steps are part of study. */
     if (was_review && g_reviews_today < 0xFFFF) g_reviews_today++;
 
@@ -1135,6 +1163,26 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
             plan_entry_t *entry = &g_plan[g_plan_hdr.pos];
             entry->flags = (uint8_t)(1u | (grade == VOCAB_AGAIN ? 2u : 0u));
             g_plan_hdr.pos++;
+            /* A failed round restarts the whole ladder at the quiz. */
+            if (grade != VOCAB_GOOD && (was_learning || was_review) &&
+                g_plan_hdr.len + 3 <= PLAN_MAX) {
+                unsigned insert_at = g_plan_hdr.len;
+                if (g_config.error_mode == 1) {
+                    for (uint16_t i = 0; i < g_plan_hdr.len; i++)
+                        if (g_plan[i].stage == VOCAB_STAGE_QUIZ) insert_at = (unsigned)i + 1;
+                    memmove(&g_plan[insert_at + 3], &g_plan[insert_at],
+                            (g_plan_hdr.len - insert_at) * sizeof(plan_entry_t));
+                    g_plan_hdr.len += 3;
+                } else {
+                    g_plan_hdr.len += 3;
+                }
+                for (unsigned k = 0; k < 3; k++) {
+                    plan_entry_t *e = &g_plan[insert_at + k];
+                    memset(e, 0, sizeof(*e));
+                    e->id = g_current;
+                    e->stage = (uint8_t)stage_for_level((uint8_t)k);
+                }
+            }
             /* 不背单词 style: a wrong card is retried at the end of its round. */
             if (g_config.error_mode == 1 && grade == VOCAB_AGAIN && g_plan_hdr.len < PLAN_MAX) {
                 unsigned same = 0;
@@ -1407,12 +1455,19 @@ bool vocab_plan_progress(uint16_t *group, uint8_t *round, uint8_t *index, uint8_
         if (phase) *phase = 2;
         return true;
     }
-    const unsigned per_round = g_plan_hdr.len / 3u;
-    if (!per_round) return false;
+    if (g_plan_hdr.pos >= g_plan_hdr.len) return false;
+    const uint8_t stage = g_plan[g_plan_hdr.pos].stage;
+    unsigned idx = 0, cnt = 0;
+    for (uint16_t i = 0; i < g_plan_hdr.len; i++) {
+        if (g_plan[i].stage != stage) continue;
+        cnt++;
+        if (i <= g_plan_hdr.pos) idx++;
+    }
+    if (!cnt) return false;
     if (group) *group = g_plan_hdr.group;
-    if (round) *round = (uint8_t)(g_plan_hdr.pos / per_round + 1);
-    if (index) *index = (uint8_t)(g_plan_hdr.pos % per_round + 1);
-    if (total) *total = (uint8_t)per_round;
+    if (round) *round = stage == VOCAB_STAGE_QUIZ ? 1 : stage == VOCAB_STAGE_RECALL ? 2 : 3;
+    if (index) *index = (uint8_t)idx;
+    if (total) *total = (uint8_t)cnt;
     if (phase) *phase = g_plan_hdr.phase;
     return true;
 }

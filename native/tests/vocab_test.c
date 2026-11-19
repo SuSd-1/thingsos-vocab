@@ -166,7 +166,7 @@ int main(void) {
 
     CHECK(vocab_answer(now, VOCAB_GOOD));
     CHECK(vocab_stats(now, &stats));
-    CHECK(stats.new_today == 1);
+    CHECK(stats.new_today == 0);   /* counted when all three rounds finish */
     CHECK(vocab_learned_count() == 0);
 
     /* Undo restores the counters and the plan cursor, then re-answer. */
@@ -253,7 +253,7 @@ int main(void) {
     /* The forgotten card comes back as a relearn group starting from the quiz;
        the fuzzy card does not. */
     CHECK(vocab_next(&card, &stage));
-    CHECK(card.id == again_id && stage == VOCAB_STAGE_WORD);
+    CHECK(card.id == again_id && stage == VOCAB_STAGE_QUIZ);
     vocab_close(later);
     snprintf(cmd, sizeof(cmd), "rm -rf %s", root4);
     CHECK(system(cmd) == 0);
@@ -321,8 +321,8 @@ int main(void) {
     CHECK(vocab_open(root2, reopen));
     CHECK(vocab_begin_session(reopen, &small, 1));
     CHECK(vocab_next(&card, &stage));
-    /* The group resumes on the next card of the round, not at the start. */
-    CHECK(stage == VOCAB_STAGE_QUIZ && card.id != resume_id);
+    /* Resume continues this word's remaining rounds, not a new word. */
+    CHECK(stage == VOCAB_STAGE_RECALL && card.id == resume_id);
     vocab_close(reopen);
     snprintf(cmd, sizeof(cmd), "rm -rf %s", root2);
     CHECK(system(cmd) == 0);

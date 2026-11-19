@@ -577,8 +577,8 @@ static void vocab_draw_round_progress(void) {
     const uint8_t state = vocab_current_state();
     const char* name = state == 0 ? "新词" : state == 1 ? "学习中" :
                        state == 2 ? "复习" : state == 3 ? "重学" : "学习";
-    if (phase == 2)
-        snprintf(line, sizeof(line), "%s · %u/%u", name, (unsigned)index, (unsigned)total);
+    if (phase == 2 && round == 3)
+        snprintf(line, sizeof(line), "复习 · %u/%u", (unsigned)index, (unsigned)total);
     else
         snprintf(line, sizeof(line), "%s · 第%u轮 · %u/%u", name, (unsigned)round,
                  (unsigned)index, (unsigned)total);
