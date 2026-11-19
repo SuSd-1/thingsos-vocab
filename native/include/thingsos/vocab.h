@@ -138,6 +138,8 @@ bool vocab_current_card(vocab_card_t *out, vocab_card_stage_t *stage);
 uint32_t vocab_learned_count(void);
 uint32_t vocab_new_count(void);
 uint8_t vocab_current_level(void);
+/* State of the card on screen (0 NEW, 1 LEARNING, 2 REVIEW, 3 RELEARNING). */
+uint8_t vocab_current_state(void);
 /* Group/round cursor of the active learning plan (false when none). */
 bool vocab_plan_progress(uint16_t *group, uint8_t *round, uint8_t *index, uint8_t *total,
                          uint8_t *phase);

@@ -1385,6 +1385,10 @@ bool vocab_plan_progress(uint16_t *group, uint8_t *round, uint8_t *index, uint8_
     return true;
 }
 
+uint8_t vocab_current_state(void) {
+    return g_current_valid ? (uint8_t)g_records[g_current].state : 0xFFu;
+}
+
 uint32_t vocab_learned_count(void) {
     uint32_t learned = 0;
     for (uint32_t i = 0; i < g_count; i++)
