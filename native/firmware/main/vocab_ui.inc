@@ -1215,8 +1215,8 @@ bool vocab_side_keys_active(void) {
 bool vocab_side_key(unsigned key) {
     if (!vocab_side_keys_active()) return false;
     if (vu.phase == VOCAB_PHASE_ANSWER) {
-        if (key == 0) return vocab_tap(200, 1150);   /* 下一词 */
-        if (key == 1) return vocab_tap(500, 1150);   /* 记错了 */
+        if (key == 0 || key == 2) return vocab_tap(200, 1150);   /* 下一词 */
+        if (key == 1 || key == 3) return vocab_tap(500, 1150);   /* 记错了 */
         return true;                                  /* consume, no action */
     }
     if (vu.stage == VOCAB_STAGE_QUIZ) {

@@ -1120,6 +1120,8 @@ static bool keyq_pop(uint8_t src, unsigned* action) {
     return ok;
 }
 static unsigned power_release_ms;
+static bool power_release_after_1s;
+static bool key_scan_enabled;
 static bool power_hold1_sent;
 static void keys_poll(void) {
     bool held=power_down || side_down[0] || side_down[1];
@@ -1135,8 +1137,10 @@ static void keys_poll(void) {
         power_down=pressed;power_since=now;
         if(!pressed) {
             if(power_armed && !power_long_sent)power_event=power_event==2?2:1;
-            power_armed=true;power_long_sent=false;power_hold1_sent=false;
+            power_armed=true;power_long_sent=false;
             power_release_ms=(unsigned)((now-power_since)/1000);
+            power_release_after_1s=power_hold1_sent;
+            power_hold1_sent=false;
         }
     }
     if(power_down && power_armed && !power_long_sent && now-power_since>=POWER_LONG_US) {
@@ -1153,17 +1157,33 @@ static void keys_poll(void) {
     }
 }
 unsigned thingsos_board_power_release_ms(void) { return power_release_ms; }
+bool thingsos_board_power_release_after_1s(void) { return power_release_after_1s; }
+static void key_task_start(void);
+void thingsos_board_key_scan(bool enabled) {
+    if (enabled == key_scan_enabled) return;
+    key_scan_enabled = enabled;
+    if (enabled) key_task_start();
+}
 static void key_task_start(void);
 unsigned thingsos_board_power_key(void) {
-    key_task_start();
     unsigned action=0;
+    if(!key_scan_enabled) {
+        keys_poll();
+        action=power_event;power_event=0;
+        if(action)ESP_LOGI("ThingsOS_power","Power key %s",action==2?"long":action==3?"hold":"short");
+        return action;
+    }
     if(!keyq_pop(KEY_SRC_POWER,&action)) return 0;
     if(action)ESP_LOGI("ThingsOS_power","Power key %s",action==2?"long":action==3?"hold":"short");
     return action;
 }
 unsigned thingsos_board_side_key(void) {
-    key_task_start();
     unsigned action=0;
+    if(!key_scan_enabled) {
+        keys_poll();
+        action=side_event;side_event=0;
+        return action;
+    }
     keyq_pop(KEY_SRC_SIDE,&action);
     return action;
 }
@@ -1206,6 +1226,7 @@ static void ai_key_poll(void) {
 static void key_task_fn(void* unused) {
     (void)unused;
     for(;;) {
+        if(!key_scan_enabled) { vTaskDelay(pdMS_TO_TICKS(20)); continue; }
         keys_poll();
         ai_key_poll();
         if(power_event){keyq_push(KEY_SRC_POWER,power_event);power_event=0;}
@@ -1223,8 +1244,13 @@ static void key_task_start(void) {
     }
 }
 unsigned thingsos_board_ai_key(void) {
-    key_task_start();
     unsigned action=0;
+    if(!key_scan_enabled) {
+        ai_key_poll();
+        action=ai_key_event;ai_key_event=0;
+        if(action)ESP_LOGI("ThingsOS_ai","BOOT/AI key short press");
+        return action;
+    }
     if(!keyq_pop(KEY_SRC_AI,&action)) return 0;
     if(action)ESP_LOGI("ThingsOS_ai","BOOT/AI key short press");
     return action;

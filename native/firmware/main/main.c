@@ -3827,13 +3827,17 @@ void app_main(void) {
         }
         reading_power_poll();
         wifi_scan_step();
+        thingsos_board_key_scan(vocab_side_keys_active());
         unsigned power_key = thingsos_board_power_key();
         if (power_key) {
+            ESP_LOGI("vocab","power key=%u after1s=%d active=%d release=%ums",
+                     power_key, (int)thingsos_board_power_release_after_1s(),
+                     (int)vocab_side_keys_active(), thingsos_board_power_release_ms());
             if (vocab_side_keys_active()) {
                 if (power_key == 3) {
                     if (app.haptic_enabled) thingsos_board_haptic(50);
                 } else if (power_key == 1) {
-                    if (thingsos_board_power_release_ms() >= 1000) power_action(1);
+                    if (thingsos_board_power_release_after_1s()) power_action(1);
                     else vocab_side_key(3);
                 } else if (power_key == 2) {
                     if (app.haptic_enabled) thingsos_board_haptic(80);

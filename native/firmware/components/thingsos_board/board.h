@@ -87,6 +87,10 @@ void thingsos_board_idle(void);
 unsigned thingsos_board_power_key(void);
 /* How long the last power-key press was held before release (ms). */
 unsigned thingsos_board_power_release_ms(void);
+/* True when the last power-key release happened after the 1 s hold mark. */
+bool thingsos_board_power_release_after_1s(void);
+/* Enable the background key sampler; off means direct polling (default). */
+void thingsos_board_key_scan(bool enabled);
 /* Volume keys: 0 none, 1 previous page (Vol+), 2 next page (Vol-). */
 unsigned thingsos_board_side_key(void);
 /* BOOT/AI key: 1 on a short release, 0 otherwise. Held at power-on is ignored. */
