@@ -22,6 +22,7 @@ typedef enum {
     VOCAB_SCREEN_DONE,
     VOCAB_SCREEN_SETTINGS,
     VOCAB_SCREEN_STATS,
+    VOCAB_SCREEN_RESET,
 } vocab_screen_t;
 
 typedef enum {
@@ -35,6 +36,7 @@ static int vu_region_x, vu_region_y, vu_region_w, vu_region_h;
 static uint64_t vu_time_last_us;
 static uint32_t vu_time_pending_ms;
 static bool vu_confirm_clear;
+static bool vu_confirm_defaults;
 static bool vu_full_requested;
 static uint8_t vu_pending_audio;
 static bool vu_hint_valid;
@@ -670,10 +672,10 @@ static void vocab_draw_home(void) {
     else { snprintf(line, sizeof(line), "%u", review_left); label(line, 376, 1050, 60, 240); }
 }
 
-static const char* const vocab_setting_names[11] = {
+static const char* const vocab_setting_names[10] = {
     "每日新词目标", "每组词数", "目标保持率", "学习算法",
     "随机选词", "自动发音", "朗读例句", "答错处理", "侧键答题",
-    "清空学习进度", "恢复默认设置",
+    "恢复与重置",
 };
 
 static void vocab_format_span(uint32_t seconds, char* out, size_t bytes) {
@@ -691,6 +693,33 @@ static void vocab_draw_bottom_bar(int active) {
         const int cx = i * 228 + 114;
         if (i == active) thingsos_rect(&app.canvas, cx - 26, 1186, 52, 3, 0);
         centered_label(labels[i], i * 228, 1170, 26, 228);
+    }
+}
+
+static void vocab_draw_reset(void) {
+    vocab_header("恢复与重置");
+    centered_label("请选择要执行的操作", 36, 300, 26, 612);
+    vocab_button(36, 380, 612, 90, "清空学习进度");
+    centered_label("只删除学习记录，词库与发音保留", 36, 500, 22, 612);
+    vocab_button(36, 560, 612, 90, "恢复默认设置");
+    centered_label("只重置本应用的设置项", 36, 680, 22, 612);
+    if (vu_confirm_clear) {
+        thingsos_rect(&app.canvas, 90, 470, 504, 252, 255);
+        thingsos_rect(&app.canvas, 90, 470, 504, 2, 0);
+        thingsos_rect(&app.canvas, 90, 720, 504, 2, 0);
+        centered_label("确定清空全部学习进度？", 90, 542, 30, 504);
+        centered_label("词库与发音不会被删除", 90, 592, 22, 504);
+        vocab_button(120, 632, 180, 70, "取消");
+        vocab_button(384, 632, 180, 70, "确定");
+    }
+    if (vu_confirm_defaults) {
+        thingsos_rect(&app.canvas, 90, 470, 504, 252, 255);
+        thingsos_rect(&app.canvas, 90, 470, 504, 2, 0);
+        thingsos_rect(&app.canvas, 90, 720, 504, 2, 0);
+        centered_label("确定恢复默认设置？", 90, 542, 30, 504);
+        centered_label("学习记录与词库不受影响", 90, 592, 22, 504);
+        vocab_button(120, 632, 180, 70, "取消");
+        vocab_button(384, 632, 180, 70, "确定");
     }
 }
 
@@ -718,7 +747,7 @@ static void vocab_draw_stats(void) {
 static void vocab_draw_settings(void) {
     vocab_header("设置");
     char value[32];
-    for (int i = 0; i < 11; i++) {
+    for (int i = 0; i < 10; i++) {
         const int y = 236 + i * 70;
         label(vocab_setting_names[i], 36, y, 26, 360);
         value[0] = 0;
@@ -758,7 +787,7 @@ static void vocab_draw_settings(void) {
                 }
             }
         } else {
-            vocab_button(470, y - 34, 178, 48, i == 9 ? "清 空" : "恢 复");
+            vocab_button(430, y - 34, 218, 48, "恢复与重置");
         }
         thingsos_rect(&app.canvas, 36, y + 18, 612, 1, 210);
     }
@@ -864,10 +893,12 @@ static bool vocab_draw(void) {
 
     if (vu.screen == VOCAB_SCREEN_HOME) vocab_draw_bottom_bar(0);
     else if (vu.screen == VOCAB_SCREEN_STATS) vocab_draw_bottom_bar(1);
-    else if (vu.screen == VOCAB_SCREEN_SETTINGS) vocab_draw_bottom_bar(2);
+    else if (vu.screen == VOCAB_SCREEN_SETTINGS || vu.screen == VOCAB_SCREEN_RESET)
+        vocab_draw_bottom_bar(2);
     switch (vu.screen) {
         case VOCAB_SCREEN_HOME: vocab_draw_home(); break;
         case VOCAB_SCREEN_SETTINGS: vocab_draw_settings(); break;
+        case VOCAB_SCREEN_RESET: vocab_draw_reset(); break;
         case VOCAB_SCREEN_STATS: vocab_draw_stats(); break;
         case VOCAB_SCREEN_DONE: vocab_draw_done(); break;
         default:
@@ -919,6 +950,11 @@ static bool vocab_tap(int x, int y) {
             vu.screen = VOCAB_SCREEN_HOME;
             vu_confirm_clear = false;
             app.dirty = true;
+        } else if (vu.screen == VOCAB_SCREEN_RESET) {
+            vu.screen = VOCAB_SCREEN_SETTINGS;
+            vu_confirm_clear = false;
+            vu_confirm_defaults = false;
+            app.dirty = true;
         } else {
             vocab_stop();
             vu.screen = VOCAB_SCREEN_HOME;
@@ -932,7 +968,7 @@ static bool vocab_tap(int x, int y) {
        implicit leave looked like a crash. Leaving is MENU / HOME / "<" only. */
 
     if (vu.screen == VOCAB_SCREEN_HOME || vu.screen == VOCAB_SCREEN_STATS ||
-        vu.screen == VOCAB_SCREEN_SETTINGS) {
+        vu.screen == VOCAB_SCREEN_SETTINGS || vu.screen == VOCAB_SCREEN_RESET) {
         if (vu.screen == VOCAB_SCREEN_SETTINGS && vu_confirm_clear) {
             /* handled below */
         } else if (y >= 1110) {
@@ -951,6 +987,41 @@ static bool vocab_tap(int x, int y) {
             else vocab_start_review();
             return true;
         }
+        return true;
+    }
+    if (vu.screen == VOCAB_SCREEN_RESET) {
+        if (vu_confirm_clear) {
+            if (y >= 620 && y < 712) {
+                if (x >= 120 && x < 300) {
+                    vu_confirm_clear = false;
+                    app.dirty = true;
+                } else if (x >= 384 && x < 564) {
+                    vu_confirm_clear = false;
+                    vocab_reset_progress();
+                    vu.started = true;
+                    uint32_t now = vocab_now_min();
+                    vocab_stats(now, &vu.stats);
+                    app.dirty = true;
+                }
+            }
+            return true;
+        }
+        if (vu_confirm_defaults) {
+            if (y >= 620 && y < 712) {
+                if (x >= 120 && x < 300) {
+                    vu_confirm_defaults = false;
+                    app.dirty = true;
+                } else if (x >= 384 && x < 564) {
+                    vu_confirm_defaults = false;
+                    vocab_config_defaults(&vu.config);
+                    vocab_config_save("/sdcard", &vu.config);
+                    app.dirty = true;
+                }
+            }
+            return true;
+        }
+        if (y >= 380 && y < 470) { vu_confirm_clear = true; app.dirty = true; }
+        else if (y >= 560 && y < 650) { vu_confirm_defaults = true; app.dirty = true; }
         return true;
     }
     if (vu.screen == VOCAB_SCREEN_SETTINGS) {
@@ -1012,8 +1083,12 @@ static bool vocab_tap(int x, int y) {
                 case 5: vu.config.auto_audio = (x >= 518); break;
                 case 6: vu.config.auto_example = (x >= 518); break;
                 case 7: vu.config.error_mode = (x >= 518) ? 1 : 0; break;
-                case 8: vu_confirm_clear = true; save = false; break;
-                case 9: vocab_config_defaults(&vu.config); break;
+                case 8: vu.config.side_keys = (x >= 518); break;
+                case 9:
+                    vu.screen = VOCAB_SCREEN_RESET;
+                    vu_confirm_clear = false;
+                    vu_confirm_defaults = false;
+                    break;
             }
             if (save) vocab_config_save("/sdcard", &vu.config);
             app.dirty = true;
