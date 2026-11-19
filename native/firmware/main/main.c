@@ -2981,7 +2981,7 @@ static void capacitive_key_dispatch(thingsos_key_action_t action) {
     if(app.asleep)return;
     /* Every physical key press pulses the motor, including keys consumed by
        app-specific handlers further down. */
-    if(action!=THINGSOS_KEY_NONE && app.haptic_enabled)thingsos_board_haptic(50);
+    if(action!=THINGSOS_KEY_NONE && app.haptic_enabled)thingsos_board_haptic(40);
     if(app.pin.required || app.page==THINGSOS_UI_LOCK_PIN) {
         if(app.page==THINGSOS_UI_LOCK){unlock_screen();return;}
         if(app.pin.required && app.page!=THINGSOS_UI_LOCK_PIN)pin_wake();
