@@ -556,7 +556,7 @@ static bool schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
             level = 0;
             record->state = record->state == VOCAB_STATE_NEW ? VOCAB_STATE_LEARNING
                                                              : VOCAB_STATE_RELEARNING;
-            record->due_min = now_min + 1;
+            record->due_min = now_min;   /* immediately queued for the next round */
             record->lapses++;
         } else if (grade == VOCAB_HARD) {
             record->due_min = now_min + 5;
@@ -607,7 +607,7 @@ static bool schedule_record(vocab_state_record_t *record, vocab_grade_t grade,
             record->state = VOCAB_STATE_RELEARNING;
             record->flags = 0;
             record->lapses++;
-            record->due_min = now_min + 1;
+            record->due_min = now_min;   /* immediately queued for the next round */
         } else {
             /* 认识 and 模糊 both stay in review; 模糊 just earned a shorter
                interval from the FSRS Hard grade. */
