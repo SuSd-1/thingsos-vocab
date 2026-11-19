@@ -253,7 +253,7 @@ int main(void) {
     /* The forgotten card comes back as a relearn group starting from the quiz;
        the fuzzy card does not. */
     CHECK(vocab_next(&card, &stage));
-    CHECK(card.id == again_id && stage == VOCAB_STAGE_QUIZ);
+    CHECK(card.id == again_id && stage == VOCAB_STAGE_WORD);
     vocab_close(later);
     snprintf(cmd, sizeof(cmd), "rm -rf %s", root4);
     CHECK(system(cmd) == 0);

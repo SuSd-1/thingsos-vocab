@@ -538,7 +538,6 @@ static void vocab_submit(vocab_grade_t grade) {
     if (vu.screen == VOCAB_SCREEN_REVIEW) {
         /* Forgot: repeat it at the end of this review session. Hard only
            shortens the interval; it does not start a relearn round. */
-        if (grade == VOCAB_AGAIN) vocab_review_retry(now);
         vocab_load_next();
         return;
     }

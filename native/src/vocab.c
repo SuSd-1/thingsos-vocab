@@ -848,6 +848,9 @@ static bool plan_build_learn(uint32_t now_min) {
         for (unsigned i = 0; i < m && n < per_group; i++) ids[n++] = more[i];
     }
     if (!n) return false;
+    VOCAB_LOG("learn plan: %u cards (first id=%u state=%u due=%u now=%u)",
+              n, (unsigned)ids[0], (unsigned)g_records[ids[0]].state,
+              (unsigned)g_records[ids[0]].due_min, (unsigned)now_min);
     g_plan_hdr.group++;
     plan_build_cards(ids, n, 0, 3);
     return true;
@@ -882,6 +885,9 @@ static bool plan_build_review(uint32_t now_min) {
         ids[n++] = i;
     }
     if (!n) return false;
+    VOCAB_LOG("review plan: %u due (first id=%u state=%u due=%u now=%u)",
+              n, (unsigned)ids[0], (unsigned)g_records[ids[0]].state,
+              (unsigned)g_records[ids[0]].due_min, (unsigned)now_min);
     plan_build_cards(ids, n, 2, 1);
     return true;
 }
@@ -970,8 +976,14 @@ bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus)
     g_focus = focus;
     g_exhausted = false;
     {
-        bool usable = plan_load() && g_plan_hdr.focus == (uint8_t)focus &&
+        bool loaded = plan_load();
+        const bool type_ok = (focus == 2) ? (g_plan_hdr.phase == 2u)
+                                          : (g_plan_hdr.phase != 2u);
+        bool usable = loaded && g_plan_hdr.focus == (uint8_t)focus && type_ok &&
                       g_plan_hdr.pos < g_plan_hdr.len;
+        VOCAB_LOG("begin focus=%d loaded=%d plan(focus=%u phase=%u pos=%u len=%u) usable=%d",
+                  focus, (int)loaded, (unsigned)g_plan_hdr.focus, (unsigned)g_plan_hdr.phase,
+                  (unsigned)g_plan_hdr.pos, (unsigned)g_plan_hdr.len, (int)usable);
         if (!usable) {
             bool built = false;
             if (focus == 3) {
@@ -1036,6 +1048,10 @@ bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage) {
             }
             g_stage = (vocab_card_stage_t)entry->stage;
             if (stage) *stage = g_stage;
+            VOCAB_LOG("card id=%u state=%u due=%u stage=%u pos=%u/%u",
+                      (unsigned)entry->id, (unsigned)g_records[entry->id].state,
+                      (unsigned)g_records[entry->id].due_min, (unsigned)entry->stage,
+                      (unsigned)g_plan_hdr.pos, (unsigned)g_plan_hdr.len);
             return true;
         }
         if (!plan_advance(g_now)) {
@@ -1110,6 +1126,14 @@ bool vocab_answer(uint32_t now_min, vocab_grade_t grade) {
             }
             plan_save();
         }
+    }
+    /* Review + forgot: repeat the card at the end of this review session. */
+    if (was_review && grade == VOCAB_AGAIN && g_plan_hdr.len < PLAN_MAX &&
+        g_plan_hdr.phase == 2) {
+        g_plan[g_plan_hdr.len].id = g_current;
+        g_plan[g_plan_hdr.len].stage = VOCAB_STAGE_WORD;
+        g_plan[g_plan_hdr.len].flags = 0;
+        g_plan_hdr.len++;
     }
     if (g_undo_count) {
         vocab_undo_t *undo = &g_undo[(g_undo_count - 1) % VOCAB_UNDO_DEPTH];
