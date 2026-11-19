@@ -541,9 +541,10 @@ static void vocab_submit(vocab_grade_t grade) {
     vocab_stats(now, &vu.stats);
 
     if (vu.screen == VOCAB_SCREEN_REVIEW) {
-        /* Forgot: repeat it at the end of this review session. Hard only
-           shortens the interval; it does not start a relearn round. */
-        vocab_load_next();
+        /* Same flow as the third learning round: grade, then show this card's
+           answer page; 下一词 moves on to the next review word. */
+        vu.phase = VOCAB_PHASE_ANSWER;
+        vu_pending_audio = 1;
         return;
     }
     if (graduated && vu.booster) {
