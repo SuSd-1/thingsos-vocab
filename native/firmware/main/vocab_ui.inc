@@ -1063,7 +1063,7 @@ static bool vocab_tap(int x, int y) {
             if (vu.screen == VOCAB_SCREEN_REVIEW) {
                 /* The grade is already recorded; 记错了 replaces it instead of
                    recording a second answer. */
-                if (x >= 358) vocab_regrade_by_id(now, vu.card.id, VOCAB_AGAIN);
+                if (x >= 358) vocab_regrade_by_id(vocab_now_min(), vu.card.id, VOCAB_AGAIN);
                 vocab_load_next();
             } else if (x >= 358) {
                 vocab_submit(VOCAB_AGAIN);
