@@ -41,6 +41,7 @@ static void *vocab_alloc(size_t count, size_t size) { return calloc(count, size)
 #define VOCAB_INDEX_ENTRY 40u
 #define VOCAB_JOURNAL_ENTRY 32u
 #define VOCAB_CONFIG_BYTES 20u
+#define VOCAB_MINUTES_2020 26297280u  /* minutes from 1970-01-01 to 2020-01-01 */
 #define VOCAB_UNDO_DEPTH 16u
 #define VOCAB_STATE_HEADER 32u
 #define VOCAB_STATE_VERSION 2u
@@ -523,7 +524,7 @@ static void log_review(uint32_t id, int grade, uint32_t now_min,
 /* Local calendar day (minutes since 2020 divided by a local day), derived from
    the system timezone rather than a hard-coded offset. */
 static uint32_t vocab_local_day(uint32_t now_min) {
-    const time_t t = (time_t)(((uint64_t)now_min + VOCAB_UX_MINUTES_2020) * 60u);
+    const time_t t = (time_t)(((uint64_t)now_min + VOCAB_MINUTES_2020) * 60u);
     struct tm lt, gt;
     if (localtime_r(&t, &lt) != NULL && gmtime_r(&t, &gt) != NULL) {
         int offset = (lt.tm_hour * 60 + lt.tm_min) - (gt.tm_hour * 60 + gt.tm_min);
