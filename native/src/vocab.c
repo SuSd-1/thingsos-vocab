@@ -1396,6 +1396,15 @@ uint32_t vocab_new_count(void) {
 bool vocab_plan_progress(uint16_t *group, uint8_t *round, uint8_t *index, uint8_t *total,
                          uint8_t *phase) {
     if (!g_open || g_plan_hdr.len == 0) return false;
+    if (g_plan_hdr.phase == 2) {
+        /* Review groups have a single round: the group is the whole plan. */
+        if (group) *group = g_plan_hdr.group;
+        if (round) *round = 1;
+        if (index) *index = (uint8_t)(g_plan_hdr.pos + 1);
+        if (total) *total = (uint8_t)g_plan_hdr.len;
+        if (phase) *phase = 2;
+        return true;
+    }
     const unsigned per_round = g_plan_hdr.len / 3u;
     if (!per_round) return false;
     if (group) *group = g_plan_hdr.group;
