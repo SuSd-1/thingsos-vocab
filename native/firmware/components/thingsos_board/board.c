@@ -1083,6 +1083,42 @@ static bool keys_seen,power_down,power_long_sent,power_armed;
 static int64_t power_since,side_since[2];
 static bool side_down[2];
 static unsigned power_event,side_event;
+/* Physical key events are latched here so a press that lands while the panel
+   is refreshing is still handled once the main loop returns. */
+#define KEYQ_LEN 8
+#define KEY_SRC_POWER 1
+#define KEY_SRC_SIDE 2
+#define KEY_SRC_AI 3
+static struct { uint8_t src; uint8_t action; } keyq[KEYQ_LEN];
+static unsigned keyq_head, keyq_tail, keyq_count;
+static portMUX_TYPE keyq_mux = portMUX_INITIALIZER_UNLOCKED;
+static TaskHandle_t key_task;
+static bool key_task_started;
+static void keyq_push(uint8_t src, unsigned action) {
+    if (!action) return;
+    portENTER_CRITICAL(&keyq_mux);
+    if (keyq_count < KEYQ_LEN) {
+        keyq[(keyq_head + keyq_count) % KEYQ_LEN].src = src;
+        keyq[(keyq_head + keyq_count) % KEYQ_LEN].action = (uint8_t)action;
+        keyq_count++;
+    } else {
+        keyq[keyq_head].src = src; keyq[keyq_head].action = (uint8_t)action;
+        keyq_head = (keyq_head + 1) % KEYQ_LEN;
+    }
+    portEXIT_CRITICAL(&keyq_mux);
+}
+static bool keyq_pop(uint8_t src, unsigned* action) {
+    bool ok = false;
+    portENTER_CRITICAL(&keyq_mux);
+    if (keyq_count && keyq[keyq_head].src == src) {
+        *action = keyq[keyq_head].action;
+        keyq_head = (keyq_head + 1) % KEYQ_LEN;
+        keyq_count--;
+        ok = true;
+    }
+    portEXIT_CRITICAL(&keyq_mux);
+    return ok;
+}
 static unsigned power_release_ms;
 static bool power_hold1_sent;
 static void keys_poll(void) {
@@ -1117,15 +1153,18 @@ static void keys_poll(void) {
     }
 }
 unsigned thingsos_board_power_release_ms(void) { return power_release_ms; }
+static void key_task_start(void);
 unsigned thingsos_board_power_key(void) {
-    keys_poll();
-    unsigned action=power_event;power_event=0;
-    if(action)ESP_LOGI("ThingsOS_power","Power key %s",action==2?"long":"short");
+    key_task_start();
+    unsigned action=0;
+    if(!keyq_pop(KEY_SRC_POWER,&action)) return 0;
+    if(action)ESP_LOGI("ThingsOS_power","Power key %s",action==2?"long":action==3?"hold":"short");
     return action;
 }
 unsigned thingsos_board_side_key(void) {
-    keys_poll();
-    unsigned action=side_event;side_event=0;
+    key_task_start();
+    unsigned action=0;
+    keyq_pop(KEY_SRC_SIDE,&action);
     return action;
 }
 /* The BOOT button doubles as the AI key at runtime. It is active low with an
@@ -1164,9 +1203,29 @@ static void ai_key_poll(void) {
         }
     }
 }
+static void key_task_fn(void* unused) {
+    (void)unused;
+    for(;;) {
+        keys_poll();
+        ai_key_poll();
+        if(power_event){keyq_push(KEY_SRC_POWER,power_event);power_event=0;}
+        if(side_event){keyq_push(KEY_SRC_SIDE,side_event);side_event=0;}
+        if(ai_key_event){keyq_push(KEY_SRC_AI,ai_key_event);ai_key_event=0;}
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+static void key_task_start(void) {
+    if(key_task_started)return;
+    key_task_started=true;
+    if(xTaskCreate(key_task_fn,"key_input",3072,NULL,4,&key_task)!=pdPASS){
+        key_task_started=false;
+        ESP_LOGE("ThingsOS_keys","Key sampler allocation failed");
+    }
+}
 unsigned thingsos_board_ai_key(void) {
-    ai_key_poll();
-    unsigned action=ai_key_event;ai_key_event=0;
+    key_task_start();
+    unsigned action=0;
+    if(!keyq_pop(KEY_SRC_AI,&action)) return 0;
     if(action)ESP_LOGI("ThingsOS_ai","BOOT/AI key short press");
     return action;
 }

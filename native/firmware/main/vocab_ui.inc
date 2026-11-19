@@ -546,7 +546,7 @@ static void vocab_submit(vocab_grade_t grade) {
         /* Same flow as the third learning round: grade, then show this card's
            answer page; 下一词 moves on to the next review word. */
         vu.phase = VOCAB_PHASE_ANSWER;
-        vu_pending_audio = 1;
+        vocab_play_stage_audio();
         return;
     }
     if (graduated && vu.booster) {
@@ -558,7 +558,7 @@ static void vocab_submit(vocab_grade_t grade) {
         return;
     }
     vu.phase = VOCAB_PHASE_ANSWER;
-    vu_pending_audio = 1;   /* played from the loop after this frame is shown */
+    vocab_play_stage_audio();   /* start immediately: no frame-boundary delay */
     {
         char example[256];
         vu_chain_example = (vu.config.auto_example &&
