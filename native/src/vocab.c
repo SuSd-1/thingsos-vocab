@@ -15,6 +15,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -519,6 +520,20 @@ static void log_review(uint32_t id, int grade, uint32_t now_min,
 /* flags bits 0-1: learning stage (0 quiz, 1 example, 2 bare word). */
 #define VOCAB_LEVEL_OF(record) ((record)->flags & 0x03u)
 
+/* Local calendar day (minutes since 2020 divided by a local day), derived from
+   the system timezone rather than a hard-coded offset. */
+static uint32_t vocab_local_day(uint32_t now_min) {
+    const time_t t = (time_t)(((uint64_t)now_min + VOCAB_UX_MINUTES_2020) * 60u);
+    struct tm lt, gt;
+    if (localtime_r(&t, &lt) != NULL && gmtime_r(&t, &gt) != NULL) {
+        int offset = (lt.tm_hour * 60 + lt.tm_min) - (gt.tm_hour * 60 + gt.tm_min);
+        if (lt.tm_yday != gt.tm_yday) offset += (lt.tm_yday > gt.tm_yday) ? 1440 : -1440;
+        const int64_t local = (int64_t)now_min + offset;
+        return (uint32_t)((local < 0 ? 0 : local) / VOCAB_MINUTE_PER_DAY);
+    }
+    return now_min / VOCAB_MINUTE_PER_DAY;
+}
+
 static uint32_t review_days(const vocab_config_t *cfg, vocab_state_record_t *record,
                             float stability, vocab_grade_t grade) {
     if (cfg->mode == VOCAB_MODE_CLASSIC) {
@@ -964,7 +979,7 @@ bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus)
     if (!g_open) return false;
     if (cfg) g_config = *cfg;
     g_now = now_min;
-    const uint32_t day = now_min / VOCAB_MINUTE_PER_DAY;
+    const uint32_t day = vocab_local_day(now_min);
     if (day != g_last_day) {
         g_streak = (g_last_day && day == g_last_day + 1) ? (uint16_t)(g_streak + 1) : 1;
         g_last_day = day;
@@ -1291,7 +1306,7 @@ static void time_load(void) {
 
 bool vocab_add_seconds(uint32_t seconds) {
     if (!seconds) return true;
-    const uint32_t today = g_now / VOCAB_MINUTE_PER_DAY;
+    const uint32_t today = vocab_local_day(g_now);
     if (g_time_day != today) {
         g_time_day = today;
         g_today_seconds = 0;
@@ -1324,7 +1339,7 @@ bool vocab_stats(uint32_t now_min, vocab_stats_t *out) {
         }
         out->total++;
     }
-    const uint32_t today = g_now / VOCAB_MINUTE_PER_DAY;
+    const uint32_t today = vocab_local_day(g_now);
     out->today_seconds = (g_time_day == today) ? g_today_seconds : 0;
     out->total_seconds = g_total_seconds;
     out->finished = g_exhausted;
