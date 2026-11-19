@@ -891,13 +891,15 @@ static bool plan_build_review(uint32_t now_min) {
     uint32_t ids[32];
     const unsigned per_group = (g_config.group_size >= 5 && g_config.group_size <= 20)
                                    ? g_config.group_size : PLAN_GROUP_SIZE;
-    unsigned n = 0;
-    for (uint32_t i = 0; i < g_count && n < per_group; i++) {
+    unsigned n = 0, due_all = 0;
+    for (uint32_t i = 0; i < g_count; i++) {
         const vocab_state_record_t *record = &g_records[i];
         if (record->state != VOCAB_STATE_REVIEW) continue;
         if (!record->due_min || record->due_min > now_min) continue;
-        ids[n++] = i;
+        due_all++;
+        if (n < per_group) ids[n++] = i;
     }
+    VOCAB_LOG("review due_all=%u per_group=%u chosen=%u", due_all, per_group, n);
     if (!n) return false;
     VOCAB_LOG("review plan: %u due (first id=%u state=%u due=%u now=%u)",
               n, (unsigned)ids[0], (unsigned)g_records[ids[0]].state,
