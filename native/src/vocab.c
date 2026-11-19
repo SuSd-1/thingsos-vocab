@@ -866,17 +866,37 @@ static bool plan_build_review(uint32_t now_min) {
     uint32_t ids[32];
     const unsigned per_group = (g_config.group_size >= 5 && g_config.group_size <= 20)
                                    ? g_config.group_size : PLAN_GROUP_SIZE;
-    unsigned n = plan_collect(VOCAB_STATE_REVIEW, VOCAB_STATE_REVIEW, now_min, ids, per_group);
+    /* Day granularity: everything whose due date is today or earlier. */
+    const uint32_t today_end = (now_min / VOCAB_MINUTE_PER_DAY + 1u) * VOCAB_MINUTE_PER_DAY;
+    unsigned n = 0;
+    for (uint32_t i = 0; i < g_count && n < per_group; i++) {
+        const vocab_state_record_t *record = &g_records[i];
+        if (record->state != VOCAB_STATE_REVIEW) continue;
+        if (record->due_min >= today_end) continue;
+        ids[n++] = i;
+    }
     if (!n) return false;
     plan_build_cards(ids, n, 2, 1);
+    return true;
+}
+
+bool vocab_review_retry(uint32_t now_min) {
+    (void)now_min;
+    if (!g_open || !g_plan) return false;
+    if (g_plan_hdr.len >= PLAN_MAX) return false;
+    g_plan[g_plan_hdr.len].id = g_current;
+    g_plan[g_plan_hdr.len].stage = VOCAB_STAGE_WORD;
+    g_plan[g_plan_hdr.len].flags = 0;
+    g_plan_hdr.len++;
+    plan_save();
     return true;
 }
 
 /* Move to the next plan when the current one is exhausted. */
 static bool plan_advance(uint32_t now_min) {
     if (g_plan_hdr.pos < g_plan_hdr.len) return true;
-    if (g_plan_hdr.phase != 1 && plan_build_relearn()) return true;
     if (g_focus == 2) return plan_build_review(now_min);
+    if (g_plan_hdr.phase != 1 && plan_build_relearn()) return true;
     return plan_build_learn(now_min);
 }
 
@@ -1260,8 +1280,11 @@ bool vocab_stats(uint32_t now_min, vocab_stats_t *out) {
             /* Due today only: review cards whose interval has elapsed. Cards
                learned today (due tomorrow or in a few minutes of learning) are
                not part of today's review queue. */
-            if ((record->state == VOCAB_STATE_REVIEW || record->state == VOCAB_STATE_RELEARNING) &&
-                record->due_min && record->due_min <= g_now)
+            /* Daily review = graduated cards due today (including overdue).
+               Relearning cards belong to the learning flow, not this count. */
+            const uint32_t today_end = (g_now / VOCAB_MINUTE_PER_DAY + 1u) * VOCAB_MINUTE_PER_DAY;
+            if (record->state == VOCAB_STATE_REVIEW &&
+                record->due_min && record->due_min < today_end)
                 out->due_today++;
         }
         out->total++;

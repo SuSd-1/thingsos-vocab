@@ -116,6 +116,8 @@ bool vocab_begin_session(uint32_t now_min, const vocab_config_t *cfg, int focus)
 bool vocab_next(vocab_card_t *out, vocab_card_stage_t *stage);
 bool vocab_answer(uint32_t now_min, vocab_grade_t grade);
 bool vocab_undo(uint32_t now_min);
+/* Re-queue the card that was just answered at the end of the current review. */
+bool vocab_review_retry(uint32_t now_min);
 /* UI undo helpers: keep the original answer (cancel) or replace it. */
 bool vocab_undo_cancel(uint32_t now_min);
 /* Rebuild the current group when it has not started yet (settings change). */

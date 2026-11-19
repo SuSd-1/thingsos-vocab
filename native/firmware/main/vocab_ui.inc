@@ -536,10 +536,9 @@ static void vocab_submit(vocab_grade_t grade) {
     vocab_stats(now, &vu.stats);
 
     if (vu.screen == VOCAB_SCREEN_REVIEW) {
-        if (grade == VOCAB_AGAIN || grade == VOCAB_HARD) {
-            vocab_start_booster();
-            return;
-        }
+        /* Forgot: repeat it at the end of this review session. Hard only
+           shortens the interval; it does not start a relearn round. */
+        if (grade == VOCAB_AGAIN) vocab_review_retry(now);
         vocab_load_next();
         return;
     }
@@ -646,10 +645,9 @@ static void vocab_draw_home(void) {
     vocab_gear_icon();
     const unsigned learn_left = vu.stats.new_today < vu.config.new_limit
                                     ? vu.config.new_limit - vu.stats.new_today : 0;
-    unsigned review_done = vu.stats.reviews_today;
-    if (review_done > vu.stats.due_today) review_done = vu.stats.due_today;
-    const unsigned review_left = vu.stats.due_today > review_done
-                                     ? vu.stats.due_today - review_done : 0;
+    /* due_today already excludes cards answered today (their next due is in
+       the future), so it is the remaining review count itself. */
+    const unsigned review_left = vu.stats.due_today;
     char line[64];
     snprintf(line, sizeof(line), "连续 %u 天 · 已学 %u / %u", (unsigned)vu.stats.streak,
              (unsigned)vocab_learned_count(), (unsigned)vocab_count());
