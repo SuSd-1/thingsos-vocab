@@ -875,13 +875,11 @@ static bool plan_build_review(uint32_t now_min) {
     uint32_t ids[32];
     const unsigned per_group = (g_config.group_size >= 5 && g_config.group_size <= 20)
                                    ? g_config.group_size : PLAN_GROUP_SIZE;
-    /* Day granularity: everything whose due date is today or earlier. */
-    const uint32_t today_end = (now_min / VOCAB_MINUTE_PER_DAY + 1u) * VOCAB_MINUTE_PER_DAY;
     unsigned n = 0;
     for (uint32_t i = 0; i < g_count && n < per_group; i++) {
         const vocab_state_record_t *record = &g_records[i];
         if (record->state != VOCAB_STATE_REVIEW) continue;
-        if (record->due_min >= today_end) continue;
+        if (!record->due_min || record->due_min > now_min) continue;
         ids[n++] = i;
     }
     if (!n) return false;
@@ -1310,11 +1308,11 @@ bool vocab_stats(uint32_t now_min, vocab_stats_t *out) {
             /* Due today only: review cards whose interval has elapsed. Cards
                learned today (due tomorrow or in a few minutes of learning) are
                not part of today's review queue. */
-            /* Daily review = graduated cards due today (including overdue).
-               Relearning cards belong to the learning flow, not this count. */
-            const uint32_t today_end = (g_now / VOCAB_MINUTE_PER_DAY + 1u) * VOCAB_MINUTE_PER_DAY;
+            /* Review queue = graduated cards whose due time has passed.
+               Day-based counting pulled in cards due later today, which made
+               a word learned last night reappear hours early. */
             if (record->state == VOCAB_STATE_REVIEW &&
-                record->due_min && record->due_min < today_end)
+                record->due_min && record->due_min <= g_now)
                 out->due_today++;
         }
         out->total++;
